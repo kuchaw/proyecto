@@ -5,21 +5,35 @@ const app = express();
 app.use(express.json());
 app.use(express.static(__dirname));
 
-let latestTelemetry = null;
-
+let telemetryHistory = [];
 
 app.post("/api/telemetry", (req, res) => {
-  latestTelemetry = req.body;
-  console.log("Received:", latestTelemetry);
+  const data = req.body;
+
+  const now = new Date();
+
+  const entry = {
+    lat: data.lat,
+    lon: data.lon,
+    alt: data.alt,
+    sat: data.sat,
+    date: now.toISOString().split("T")[0],
+    time: now.toTimeString().split(" ")[0]
+  };
+
+  telemetryHistory.push(entry);
+
+  console.log("Stored:", entry);
+
   res.sendStatus(200);
 });
 
 app.get("/api/telemetry", (req, res) => {
-  res.json(latestTelemetry || null);
+  res.json(telemetryHistory);
 });
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log("Running on port jfjjyjd6jyj", PORT);
+  console.log("Running on port", PORT);
 });

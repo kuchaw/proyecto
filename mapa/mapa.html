@@ -31,37 +31,33 @@
   }).addTo(map);
 
   //  Marker (initially null)
-  // a ver si esto se commitea xddd
-  
-  let marker = null;
+  // a ver si esto se commitea
+ let marker = null;
+let polyline = L.polyline([], { color: "red" }).addTo(map);
 
-  // 🔁 Fetch GPS and update map
-  async function updateGPS() {
-    try {
-      const res = await fetch("/api/telemetry");
-      const data = await res.json();
+async function updateGPS() {
+  const res = await fetch("/api/telemetry");
+  const data = await res.json();
 
-      console.log("DATA:", data);
+  if (!data || data.length === 0) return;
 
-      if (!data || !data.lat || !data.lon) return;
+  const last = data[data.length - 1];
+  const point = [last.lat, last.lon];
 
-      const point = [data.lat, data.lon];
+  // update path
+  const path = data.map(p => [p.lat, p.lon]);
+  polyline.setLatLngs(path);
 
-      if (!marker) {
-        marker = L.marker(point).addTo(map);
-        map.setView(point, 15);
-      } else {
-        marker.setLatLng(point);
-      }
-
-    } catch (err) {
-      console.error("Error fetching GPS:", err);
-    }
+  // update marker
+  if (!marker) {
+    marker = L.marker(point).addTo(map);
+    map.setView(point, 15);
+  } else {
+    marker.setLatLng(point);
   }
+}
 
-  // ⏱️ Update every 2 seconds
-  setInterval(updateGPS, 2000);
-
+setInterval(updateGPS, 2000);
 </script>
 
 </body>
