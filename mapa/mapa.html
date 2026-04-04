@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>GPS Map</title>
+  <meta charset="utf-8" />
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+  <style>
+    #map {
+      height: 100vh;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+  // 🗺️ Create map
+  var map = L.map('map').setView([0, 0], 2);
+
+  // 🌍 Add tiles
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  // 📍 Marker (initially null)
+  let marker = null;
+
+  // 🔁 Fetch GPS and update map
+  async function updateGPS() {
+    try {
+      const res = await fetch("/api/telemetry");
+      const data = await res.json();
+
+      console.log("DATA:", data);
+
+      if (!data || !data.lat || !data.lon) return;
+
+      const point = [data.lat, data.lon];
+
+      if (!marker) {
+        marker = L.marker(point).addTo(map);
+        map.setView(point, 15);
+      } else {
+        marker.setLatLng(point);
+      }
+
+    } catch (err) {
+      console.error("Error fetching GPS:", err);
+    }
+  }
+
+  // ⏱️ Update every 2 seconds
+  setInterval(updateGPS, 2000);
+
+</script>
+
+</body>
+</html>
