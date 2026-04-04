@@ -33,6 +33,7 @@ app.post("/api/telemetry", (req, res) => {
 
 app.get("/api/telemetry", (req, res) => {
   res.json(telemetryHistory);
+  res.send("new version running");
 });
 
 const PORT = process.env.PORT || 3000;

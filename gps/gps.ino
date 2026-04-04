@@ -11,7 +11,7 @@ const char* ssid = "Fernandez";
 const char* password = "16111505";
 
 // Server endpoint (CHANGE THIS)
-const char* serverUrl = "http://192.168.0.101:3000/api/telemetry";
+const char* serverUrl = "https://proyecto-reso.onrender.com";
 
 void setup() {
   Serial.begin(115200);
