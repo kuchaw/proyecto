@@ -22,6 +22,9 @@ app.post("/api/telemetry", (req, res) => {
   };
 
   telemetryHistory.push(entry);
+  if (telemetryHistory.length > 1000) {
+    telemetryHistory.shift(); // remove oldest
+  }
 
   console.log("Stored:", entry);
 
