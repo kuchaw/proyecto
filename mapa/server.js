@@ -22,7 +22,7 @@ app.post("/api/telemetry", (req, res) => {
   };
 
   telemetryHistory.push(entry);
-  if (telemetryHistory.length > 1000) {
+  if (telemetryHistory.length > 100) {
     telemetryHistory.shift(); // remove oldest
   }
 
@@ -37,6 +37,6 @@ app.get("/api/telemetry", (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log("Running on port", PORT);
 });

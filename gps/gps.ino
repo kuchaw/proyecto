@@ -5,6 +5,7 @@
 TinyGPSPlus gps;
 #define gpsSerial Serial2
 
+
 //  WiFi credentials
 const char* ssid = "Fernandez";
 const char* password = "16111505";
