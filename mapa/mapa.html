@@ -22,15 +22,17 @@
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
 <script>
-  // 🗺️ Create map
+  //  Create map
   var map = L.map('map').setView([0, 0], 2);
 
-  // 🌍 Add tiles
+  //  Add tiles
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
 
-  // 📍 Marker (initially null)
+  //  Marker (initially null)
+  // a ver si esto se commitea xddd
+  
   let marker = null;
 
   // 🔁 Fetch GPS and update map
@@ -64,3 +66,4 @@
 
 </body>
 </html>
+
