@@ -30,7 +30,7 @@ app.post("/api/telemetry", (req, res) => {
     telemetryHistory.shift(); // remove oldest
   }
 
-  console.log("StoredFKñvskdncpaoivéiw:", entry);
+  console.log("Stored", entry);
 
   res.sendStatus(200);
 });
@@ -45,6 +45,6 @@ app.get("/", (req, res) => {
   res.sendFile(__dirname + "/mapa.html");
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log("Running on port", PORT);
 });
