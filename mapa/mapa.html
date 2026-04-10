@@ -60,20 +60,31 @@
   <div id="panel">
    <h3>Telemetry</h3>
 
-   <div class="card"><p>Temp (°C)</p><span id="temp">--</span></div>
-    <div class="card"><p>Pressure (hPa)</p><span id="pressure">--</span></div>
-   <div class="card"><p>Humidity (%)</p><span id="humidity">--</span></div>
+  <!-- Ambiente -->
+  <div class="section">
+    <h4 class="title env">ENVIRONMENT</h4>
 
-   <div class="card"><p>Altitude (m)</p><span id="alt">--</span></div>
+    <div class="card"><p>Temp (°C)</p><span id="temp">--</span></div>
+    <div class="card"><p>Pressure (hPa)</p><span id="pressure">--</span></div>
+    <div class="card"><p>Humidity (%)</p><span id="humidity">--</span></div>
+  </div>
+
+  <!-- GPS -->
+  <div class="section">
+    <h4 class="title gps">GPS</h4>
 
     <div class="card"><p>Latitude</p><span id="lat">--</span></div>
     <div class="card"><p>Longitude</p><span id="lon">--</span></div>
-
+    <div class="card"><p>Altitude (m)</p><span id="alt">--</span></div>
     <div class="card"><p>Satellites</p><span id="sat">--</span></div>
-
-    <div class="card"><p>UTC Time</p><span id="time">--</span></div>
   </div>
 
+  <!-- Hora -->
+  <div class="section">
+    <h4 class="title time">TIME</h4>
+
+    <div class="card"><p>UTC</p><span id="time">--</span></div>
+  </div>
 <div id="map"></div>
 
 
