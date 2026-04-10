@@ -45,6 +45,6 @@ app.get("/", (req, res) => {
   res.sendFile(__dirname + "/mapa.html");
 });
 
-app.listen(PORT, "0.0.0.0",() => {
+app.listen(PORT, () => {
   console.log("Running on port", PORT);
 });
