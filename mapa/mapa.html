@@ -114,7 +114,7 @@ async function updateGPS() {
 
   if (!data || data.length === 0) return;
 
-  const last = data[data.length - 1];
+  const last = data[data.length - 1]; 
   const point = [last.lat, last.lon];
 
   // update path

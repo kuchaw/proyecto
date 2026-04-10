@@ -13,10 +13,14 @@ app.post("/api/telemetry", (req, res) => {
   const now = new Date();
 
   const entry = {
-    lat: data.lat,
-    lon: data.lon,
-    alt: data.alt,
-    sat: data.sat,
+
+    lat: -34.6 + (Math.random() - 0.5) * 0.1,
+    lon: -58.4 + (Math.random() - 0.5) * 0.1,
+    alt: 100 + Math.random() * 50,
+    sat: Math.floor(5 + Math.random() * 3),
+    temp: 20 + Math.random() * 5,
+    pressure: 1000 + Math.random() * 10,
+    humidity: 50 + Math.random() * 20,
     date: now.toISOString().split("T")[0],
     time: now.toTimeString().split(" ")[0]
   };
@@ -33,7 +37,6 @@ app.post("/api/telemetry", (req, res) => {
 
 app.get("/api/telemetry", (req, res) => {
   res.json(telemetryHistory);
-  res.send("new version running");
 });
 
 const PORT = process.env.PORT || 3000;
