@@ -1,62 +1,50 @@
-console.log("🔥 SERVER FILE LOADED");
 const express = require("express");
-const path = require("path");
 
 const app = express();
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(__dirname));
 
 let telemetryHistory = [];
-app.get("/ping", (req, res) => {
-  console.log("🔥 PING HIT");
-  res.send("pong");
-});
-// TEST ROUTE (very important)
-app.get("/test", (req, res) => {
-  res.send("OK");
-});
-
-// API
-app.get("/api/telemetry", (req, res) => {
-  res.json(telemetryHistory);
-});
 
 app.post("/api/telemetry", (req, res) => {
-  console.log("🔥 BODY:", req.body);
+  const data = req.body;
 
   const now = new Date();
 
   const entry = {
-    lat: req.body.lat,
-    lon: req.body.lon,
-    alt: req.body.alt,
-    sat: req.body.sat,
-    temp: req.body.temp,
-    pressure: req.body.pressure,
-    humidity: req.body.humidity,
-    time: now.toISOString()
+
+    lat: -34.6 + (Math.random() - 0.5) * 0.1,
+    lon: -58.4 + (Math.random() - 0.5) * 0.1,
+    alt: 100 + Math.random() * 50,
+    sat: Math.floor(5 + Math.random() * 3),
+    temp: 20 + Math.random() * 5,
+    pressure: 1000 + Math.random() * 10,
+    humidity: 50 + Math.random() * 20,
+    date: now.toISOString().split("T")[0],
+    time: now.toTimeString().split(" ")[0]
   };
 
   telemetryHistory.push(entry);
+  if (telemetryHistory.length > 100) {
+    telemetryHistory.shift(); // remove oldest
+  }
 
-  console.log("🔥 STORED:", entry);
+  console.log("Stored", entry);
 
   res.sendStatus(200);
 });
 
-// ROOT
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "mapa.html"));
-});
-
-// CRASH DEBUG
-process.on("uncaughtException", (err) => {
-  console.error("🔥 ERROR:", err);
+app.get("/api/telemetry", (req, res) => {
+  res.json(telemetryHistory);
 });
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log("🚀 Running on port", PORT);
+app.get("/", (req, res) => {
+  res.sendFile(__dirname + "/mapa.html");
+});
+
+app.listen(PORT, "0.0.0.0",() => {
+  console.log("Running on port", PORT);
 });
