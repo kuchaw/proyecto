@@ -58,22 +58,20 @@
 <body>
 <div id="container">
   <div id="panel">
-    <h3>Telemetry</h3>
+   <h3>Telemetry</h3>
 
-    <div class="card green">
-      <p>Temp (°C)</p>
-      <span id="temp">--</span>
-    </div>
+   <div class="card"><p>Temp (°C)</p><span id="temp">--</span></div>
+    <div class="card"><p>Pressure (hPa)</p><span id="pressure">--</span></div>
+   <div class="card"><p>Humidity (%)</p><span id="humidity">--</span></div>
 
-    <div class="card green">
-      <p>Pressure (hPa)</p>
-      <span id="pressure">--</span>
-    </div>
+   <div class="card"><p>Altitude (m)</p><span id="alt">--</span></div>
 
-    <div class="card green">
-      <p>Voltage (V)</p>
-      <span id="voltage">--</span>
-    </div>
+    <div class="card"><p>Latitude</p><span id="lat">--</span></div>
+    <div class="card"><p>Longitude</p><span id="lon">--</span></div>
+
+    <div class="card"><p>Satellites</p><span id="sat">--</span></div>
+
+    <div class="card"><p>UTC Time</p><span id="time">--</span></div>
   </div>
 
 <div id="map"></div>
@@ -110,6 +108,19 @@ async function updateGPS() {
   const path = data.map(p => [p.lat, p.lon]);
   polyline.setLatLngs(path);
 
+
+  document.getElementById("temp").innerText = last.temp ?? "--";
+  document.getElementById("pressure").innerText = last.pressure ?? "--";
+  document.getElementById("humidity").innerText = last.humidity ?? "--";
+
+  document.getElementById("alt").innerText = last.alt ?? "--";
+
+  document.getElementById("lat").innerText = last.lat ?? "--";
+  document.getElementById("lon").innerText = last.lon ?? "--";
+
+  document.getElementById("sat").innerText = last.sat ?? "--";
+
+  document.getElementById("time").innerText = last.time ?? "--";
   // update marker
   if (!marker) {
     marker = L.marker(point).addTo(map);
