@@ -1,3 +1,4 @@
+console.log("🔥 SERVER FILE LOADED");
 const express = require("express");
 const path = require("path");
 
@@ -7,7 +8,10 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
 let telemetryHistory = [];
-
+app.get("/ping", (req, res) => {
+  console.log("🔥 PING HIT");
+  res.send("pong");
+});
 // TEST ROUTE (very important)
 app.get("/test", (req, res) => {
   res.send("OK");
