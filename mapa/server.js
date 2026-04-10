@@ -32,8 +32,8 @@ app.post("/api/telemetry", (req, res) => {
 
   console.log("Stored:", entry);
 
- // res.sendStatus(200);
-}, 3000);
+  res.sendStatus(200);
+});
 
 app.get("/api/telemetry", (req, res) => {
   res.json(telemetryHistory);
