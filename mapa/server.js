@@ -30,7 +30,7 @@ app.post("/api/telemetry", (req, res) => {
     telemetryHistory.shift(); // remove oldest
   }
 
-  console.log("Stored:", entry);
+  console.log("StoredFKñvskdncpaoivéiw:", entry);
 
   res.sendStatus(200);
 });
