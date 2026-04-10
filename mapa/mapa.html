@@ -15,8 +15,29 @@
   </style>
 </head>
 <body>
+<div id="container">
+  <div id="panel">
+    <h3>Telemetry</h3>
+
+    <div class="card green">
+      <p>Temp (°C)</p>
+      <span id="temp">--</span>
+    </div>
+
+    <div class="card green">
+      <p>Pressure (hPa)</p>
+      <span id="pressure">--</span>
+    </div>
+
+    <div class="card green">
+      <p>Voltage (V)</p>
+      <span id="voltage">--</span>
+    </div>
+  </div>
 
 <div id="map"></div>
+
+
 
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>

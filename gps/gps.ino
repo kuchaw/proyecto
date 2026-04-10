@@ -1,17 +1,19 @@
 #include <TinyGPSPlus.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 TinyGPSPlus gps;
 #define gpsSerial Serial2
 
 
+
 //  WiFi credentials
-const char* ssid = "Fernandez";
-const char* password = "16111505";
+const char* ssid = "Electronica";
+const char* password = "KIRCHHOFF24";
 
 // Server endpoint (CHANGE THIS)
-const char* serverUrl = "https://proyecto-reso.onrender.com";
+const char* serverUrl = "https://proyecto-reso.onrender.com/api/telemetry";
 
 void setup() {
   Serial.begin(115200);
@@ -66,6 +68,14 @@ void sendToServer() {
     json += "\"alt\":" + String(gps.altitude.meters()) + ",";
     json += "\"sat\":" + String(gps.satellites.value());
     json += "}";
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
+   
+
+    http.begin(client, "https://proyecto-reso.onrender.com/api/telemetry");
+    http.addHeader("Content-Type", "application/json");
 
     int code = http.POST(json);
 
