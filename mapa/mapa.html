@@ -1,151 +1,205 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>GPS Map</title>
+  <title>Telemetry Map</title>
   <meta charset="utf-8" />
 
-  <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
 
   <style>
+    body {
+      margin: 0;
+      background: #0b0f14;
+      color: white;
+      font-family: monospace;
+    }
+
+    #container {
+      display: flex;
+      height: 100vh;
+    }
+
+    #panel {
+      width: 340px;
+      background: #0b0f14;
+      color: white;
+      padding: 12px;
+      border-right: 2px solid #222;
+      overflow-y: auto;
+      box-sizing: border-box;
+    }
+
     #map {
+      flex: 1;
       height: 100vh;
       width: 100%;
     }
 
-    body {
-  margin: 0;
-}
+    .section {
+      margin-bottom: 14px;
+    }
 
-#container {
-  display: flex;
-  height: 100vh;
-}
+    .title {
+      margin: 0 0 8px 0;
+      font-size: 14px;
+      color: #7dd3fc;
+    }
 
-#panel {
-  width: 260px;
-  background: #0b0f14;
-  color: white;
-  padding: 10px;
-  font-family: monospace;
-  border-right: 2px solid #222;
-}
+    .card {
+      background: #000;
+      border: 1px solid #333;
+      margin-bottom: 8px;
+      padding: 10px;
+      border-radius: 6px;
+    }
 
-#map {
-  flex: 1;
-}
+    .card p {
+      margin: 0 0 6px 0;
+      font-size: 12px;
+      color: #aaa;
+    }
 
-.card {
-  background: #000;
-  border: 1px solid #333;
-  margin-bottom: 10px;
-  padding: 10px;
-}
+    .card span {
+      font-size: 24px;
+      font-weight: bold;
+      color: #00ff88;
+      word-break: break-word;
+    }
 
-.card p {
-  margin: 0;
-  font-size: 12px;
-  color: #aaa;
-}
-
-.card span {
-  font-size: 28px;
-  font-weight: bold;
-  color: #00ff88;
-}
+    h3 {
+      margin-top: 0;
+    }
   </style>
 </head>
 <body>
-<div id="container">
-  <div id="panel">
-    <h3>Telemetry</h3>
+  <div id="container">
+    <div id="panel">
+      <h3>Telemetry</h3>
 
-    <!-- ENVIRONMENT -->
-    <div class="section">
-      <h4 class="title env">ENVIRONMENT</h4>
+      <div class="section">
+        <h4 class="title">ENVIRONMENT</h4>
+        <div class="card"><p>Temp DS18B20 (°C)</p><span id="temp">--</span></div>
+        <div class="card"><p>Temp BME680 (°C)</p><span id="temp_bme">--</span></div>
+        <div class="card"><p>Pressure (hPa)</p><span id="pressure">--</span></div>
+        <div class="card"><p>Humidity (%)</p><span id="humidity">--</span></div>
+        <div class="card"><p>Gas (kΩ)</p><span id="gas">--</span></div>
+      </div>
 
-      <div class="card"><p>Temp (°C)</p><span id="temp">--</span></div>
-      <div class="card"><p>Pressure (hPa)</p><span id="pressure">--</span></div>
-      <div class="card"><p>Humidity (%)</p><span id="humidity">--</span></div>
+      <div class="section">
+        <h4 class="title">GPS</h4>
+        <div class="card"><p>Latitude</p><span id="lat">--</span></div>
+        <div class="card"><p>Longitude</p><span id="lon">--</span></div>
+        <div class="card"><p>Altitude (m)</p><span id="alt">--</span></div>
+        <div class="card"><p>Satellites</p><span id="sat">--</span></div>
+        <div class="card"><p>Speed (km/h)</p><span id="speed">--</span></div>
+        <div class="card"><p>Course (°)</p><span id="course">--</span></div>
+      </div>
+
+      <div class="section">
+        <h4 class="title">IMU</h4>
+        <div class="card"><p>Roll (°)</p><span id="roll">--</span></div>
+        <div class="card"><p>Pitch (°)</p><span id="pitch">--</span></div>
+        <div class="card"><p>Yaw (°)</p><span id="yaw">--</span></div>
+      </div>
+
+      <div class="section">
+        <h4 class="title">TIME</h4>
+        <div class="card"><p>Date</p><span id="date">--</span></div>
+        <div class="card"><p>Time</p><span id="time">--</span></div>
+      </div>
     </div>
 
-    <!-- GPS -->
-    <div class="section">
-      <h4 class="title gps">GPS</h4>
-
-      <div class="card"><p>Latitude</p><span id="lat">--</span></div>
-      <div class="card"><p>Longitude</p><span id="lon">--</span></div>
-      <div class="card"><p>Altitude (m)</p><span id="alt">--</span></div>
-      <div class="card"><p>Satellites</p><span id="sat">--</span></div>
-    </div>
-
-    <!-- TIME -->
-    <div class="section">
-      <h4 class="title time">TIME</h4>
-
-      <div class="card"><p>UTC</p><span id="time">--</span></div>
-
-    </div>
+    <div id="map"></div>
   </div>
-<div id="map"></div>
 
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
+  <script>
+    const map = L.map("map").setView([0, 0], 2);
 
-<!-- Leaflet JS -->
-<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
 
-<script>
-  //  Create map
-  var map = L.map('map').setView([0, 0], 2);
+    let marker = null;
+    let polyline = L.polyline([], { color: "red" }).addTo(map);
 
-  //  Add tiles
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OpenStreetMap contributors'
-  }).addTo(map);
+    function setText(id, value, digits = null) {
+      const el = document.getElementById(id);
+      if (!el) return;
 
-  //  Marker (initially null)
-  // a ver si esto se commitea
- let marker = null;
-let polyline = L.polyline([], { color: "red" }).addTo(map);
+      if (value === null || value === undefined || value === "" || Number.isNaN(value)) {
+        el.innerText = "--";
+        return;
+      }
 
-async function updateGPS() {
-  const res = await fetch("/api/telemetry");
-  const data = await res.json();
+      if (typeof value === "number" && digits !== null) {
+        el.innerText = value.toFixed(digits);
+        return;
+      }
 
-  if (!data || data.length === 0) return;
+      const asNumber = Number(value);
+      if (!Number.isNaN(asNumber) && digits !== null && value !== "") {
+        el.innerText = asNumber.toFixed(digits);
+        return;
+      }
 
-  const last = data[data.length - 1]; 
-  const point = [last.lat, last.lon];
+      el.innerText = value;
+    }
 
-  // update path
-  const path = data.map(p => [p.lat, p.lon]);
-  polyline.setLatLngs(path);
+    async function updateTelemetry() {
+      try {
+        const res = await fetch("/api/telemetry");
+        const data = await res.json();
 
+        if (!data || data.length === 0) return;
 
-  document.getElementById("temp").innerText = last.temp ?? "--";
-  document.getElementById("pressure").innerText = last.pressure ?? "--";
-  document.getElementById("humidity").innerText = last.humidity ?? "--";
+        const last = data[data.length - 1];
 
-  document.getElementById("alt").innerText = last.alt ?? "--";
+        setText("temp", last.temp, 2);
+        setText("temp_bme", last.temp_bme, 2);
+        setText("pressure", last.pressure, 2);
+        setText("humidity", last.humidity, 2);
+        setText("gas", last.gas, 2);
 
-  document.getElementById("lat").innerText = last.lat ?? "--";
-  document.getElementById("lon").innerText = last.lon ?? "--";
+        setText("lat", last.lat, 6);
+        setText("lon", last.lon, 6);
+        setText("alt", last.alt, 2);
+        setText("sat", last.sat);
+        setText("speed", last.speed, 2);
+        setText("course", last.course, 2);
 
-  document.getElementById("sat").innerText = last.sat ?? "--";
+        setText("roll", last.roll, 2);
+        setText("pitch", last.pitch, 2);
+        setText("yaw", last.yaw, 2);
 
-  document.getElementById("time").innerText = last.time ?? "--";
-  // update marker
-  if (!marker) {
-    marker = L.marker(point).addTo(map);
-    map.setView(point, 15);
-  } else {
-    marker.setLatLng(point);
-  }
-}
+        setText("date", last.date);
+        setText("time", last.time);
 
-setInterval(updateGPS, 2000);
-</script>
+        const validPoints = data
+          .filter(p => p.lat !== null && p.lat !== undefined && p.lon !== null && p.lon !== undefined)
+          .map(p => [Number(p.lat), Number(p.lon)])
+          .filter(([lat, lon]) => !Number.isNaN(lat) && !Number.isNaN(lon));
 
+        if (validPoints.length > 0) {
+          polyline.setLatLngs(validPoints);
+
+          const point = validPoints[validPoints.length - 1];
+
+          if (!marker) {
+            marker = L.marker(point).addTo(map);
+            map.setView(point, 15);
+          } else {
+            marker.setLatLng(point);
+          }
+        }
+      } catch (err) {
+        console.error("Error fetching telemetry:", err);
+      }
+    }
+
+    updateTelemetry();
+    setInterval(updateTelemetry, 2000);
+  </script>
 </body>
 </html>
-

@@ -8,21 +8,40 @@ app.use(express.static(path.join(__dirname)));
 
 let telemetryHistory = [];
 
-//
-// 🔥 SIMULATION (this feeds your flashcards)
-//
-setInterval(() => {
+app.get("/api/telemetry", (req, res) => {
+  res.json(telemetryHistory);
+});
+
+app.post("/api/telemetry", (req, res) => {
+  const data = req.body;
   const now = new Date();
 
   const entry = {
-    lat: -34.6 + (Math.random() - 0.5) * 0.01,
-    lon: -58.4 + (Math.random() - 0.5) * 0.01,
-    alt: 100 + Math.random() * 20,
-    sat: Math.floor(5 + Math.random() * 3),
-    temp: 20 + Math.random() * 5,
-    pressure: 1000 + Math.random() * 10,
-    humidity: 50 + Math.random() * 20,
-    time: now.toTimeString().split(" ")[0]
+    // GPS
+    lat: data.lat ?? null,
+    lon: data.lon ?? null,
+    alt: data.alt ?? null,
+    sat: data.sat ?? null,
+    speed: data.speed ?? null,
+    course: data.course ?? null,
+
+    // Main environment fields used by current HTML
+    temp: data.temp ?? null,
+    pressure: data.pressure ?? null,
+    humidity: data.humidity ?? null,
+
+    // Extra sensors
+    temp_bme: data.temp_bme ?? null,
+    gas: data.gas ?? null,
+
+    // IMU
+    roll: data.roll ?? null,
+    pitch: data.pitch ?? null,
+    yaw: data.yaw ?? null,
+
+    // Time
+    date: data.date || now.toISOString().split("T")[0],
+    time: data.time || now.toTimeString().split(" ")[0]
   };
 
   telemetryHistory.push(entry);
@@ -31,33 +50,11 @@ setInterval(() => {
     telemetryHistory.shift();
   }
 
-  console.log("📡 Simulated:", entry);
-}, 3000);
+  console.log("📡 Stored:", entry);
 
-//
-// API (your frontend uses this)
-//
-app.get("/api/telemetry", (req, res) => {
-  res.json(telemetryHistory);
+  res.status(200).json({ ok: true });
 });
 
-//
-// POST (future real data)
-//
-app.post("/api/telemetry", (req, res) => {
-  const entry = {
-    ...req.body,
-    time: new Date().toTimeString().split(" ")[0]
-  };
-
-  telemetryHistory.push(entry);
-
-  res.sendStatus(200);
-});
-
-//
-// ROOT
-//
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "mapa.html"));
 });
