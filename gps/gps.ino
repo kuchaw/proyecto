@@ -13,7 +13,7 @@ const char* ssid = "Electronica";
 const char* password = "KIRCHHOFF24";
 
 // Server endpoint (CHANGE THIS)
-const char* serverUrl = "https://proyecto-reso.onrender.com/api/telemetry";
+const char* serverUrl = "https://cansat1.onrender.com/api/telemetry";
 
 void setup() {
   Serial.begin(115200);
