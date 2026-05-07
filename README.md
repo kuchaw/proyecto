@@ -1,5 +1,4 @@
 Proyecto de la Escuela Secundaria de Educación Tecnica (ESETP) N°703 José Toschke de la ciudad de Puerto Madryn.
 Este proyecto final es del area de electronica y el grupo a relizar el proyecto está conformado por Lazcano Iñaki, Juan Gonzalez y Camina Santiago.
-El proyecto consta de un pequeño prototipo de satelite conocido como "CANSAT" diseñado para medir datos atmosfericos a gran altura el cual va acoplado a un globo meteorológico de helio para poder alcanzar, aproximadamente, los 30 kilómetros de altura. Las variables a medir son: humedad, temperatura, presión atmosferica, altitud, longitud, latitud, radiación) 
-el objetivo es transmitir los datos en tiempo real a traves de un modulo LoRa a una estación terrena, para el posterior analisis y mostrado de los datos a traves de una 
-pagina web en la que se podran ver los datos medidos y la ubicacion del globo.
+El proyecto consta de un pequeño prototipo de satelite conocido como "CANSAT" diseñado para medir datos atmosfericos y participar en la competencia/muestra llevada a cabo por la UNSAM entre las fechas 24 y 27 de noviembre de 2026 en buenos aires.
+El objetivo del cansat es la medicion de datos (humedad, temperatura, presión atmosferica, altitud, longitud, latitud) y el aterrizaje seguro del mismo luego de ser desplegado de un dron a aproximadamente 100 metros. El cansat debe ser capaz de operar en diferentes modos y enviar telemetría a una estacion terrena que debe ser capaz de analizar y almacenar los datos para un posteior analisis
