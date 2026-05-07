@@ -1,15 +1,11 @@
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
+#include <Wire.h>
 #include <SPI.h>
 #include <RF24.h>
+#include <math.h>
 
-// =========================
-// WiFi + server
-// =========================
-const char* ssid = "Electronica";
-const char* password = "KIRCHHOFF24";
-const char* serverUrl = "https://cansat1.onrender.com/api/telemetry";
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME680.h>
+#include <TinyGPS++.h>
 
 // =========================
 // nRF24
@@ -20,140 +16,173 @@ const char* serverUrl = "https://cansat1.onrender.com/api/telemetry";
 RF24 radio(NRF_CE, NRF_CSN);
 const byte address[6] = "GAAY1";
 
-// Must match transmitter struct exactly
+// Keep packet explicitly 32 bytes for nRF24 compatibility
 struct TelemetryPacket {
   uint32_t counter;
   float lat;
   float lon;
   float alt;
-  float temp;       // BME680 temperature
-  float pressure;   // BME680 pressure
-  float humidity;   // BME680 humidity
+  float temp;
+  float pressure;
+  float humidity;
   uint8_t sat;
   uint8_t padding[3];
 };
 
 TelemetryPacket packet;
 
-void connectWiFi();
-void sendToServer(const TelemetryPacket& p);
+// =========================
+// GPS
+// =========================
+#define RXD2 16
+#define TXD2 17
+
+TinyGPSPlus gps;
+
+// =========================
+// BME680
+// =========================
+Adafruit_BME680 bme;
+
+float lastBmeTemp = NAN;
+float lastPressure = NAN;
+float lastHumidity = NAN;
+float lastGas = NAN;
+
+// =========================
+// Timing
+// =========================
+unsigned long lastSendMs = 0;
+const unsigned long sendIntervalMs = 2000;
+
+// =========================
+// Function declarations
+// =========================
+void updateGPS();
+void updateEnvironmentalSensors();
+void sendRadioPacket();
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  connectWiFi();
+  // I2C: default ESP32 pins SDA=21, SCL=22
+  Wire.begin(21, 22);
 
+  // GPS UART
+  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
+
+  // BME680
+  if (!bme.begin(0x77)) {
+    Serial.println("BME680 not found at 0x77, trying 0x76...");
+
+    if (!bme.begin(0x76)) {
+      Serial.println("BME680 not detected");
+      while (1);
+    }
+  }
+
+  bme.setTemperatureOversampling(BME680_OS_8X);
+  bme.setHumidityOversampling(BME680_OS_2X);
+  bme.setPressureOversampling(BME680_OS_4X);
+  bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
+  bme.setGasHeater(320, 150);
+
+  Serial.println("BME680 detected");
+
+  // nRF24 SPI
   SPI.begin(18, 19, 23, NRF_CSN);
 
   if (!radio.begin()) {
-    Serial.println("nRF24 no detectado");
+    Serial.println("nRF24 not detected");
     while (1);
   }
 
-  radio.openReadingPipe(0, address);
+  radio.openWritingPipe(address);
   radio.setChannel(108);
   radio.setDataRate(RF24_250KBPS);
   radio.setPALevel(RF24_PA_LOW);
   radio.setAutoAck(true);
-  radio.startListening();
+  radio.stopListening();
 
-  Serial.print("Expected packet size: ");
-  Serial.println(sizeof(TelemetryPacket));
+  packet.counter = 0;
+  packet.padding[0] = 0;
+  packet.padding[1] = 0;
+  packet.padding[2] = 0;
 
-  Serial.println("Ground listo: nRF24 RX + HTTP POST");
+  Serial.println("Payload ready: GPS + BME680 + nRF24 TX");
 }
 
 void loop() {
-  if (radio.available()) {
-    radio.read(&packet, sizeof(packet));
+  updateGPS();
 
-    Serial.println("\n===== PACKET RECEIVED =====");
+  unsigned long now = millis();
 
-    Serial.print("Counter: ");
-    Serial.println(packet.counter);
+  if (now - lastSendMs >= sendIntervalMs) {
+    lastSendMs = now;
 
-    Serial.print("Lat: ");
-    Serial.println(packet.lat, 6);
-
-    Serial.print("Lon: ");
-    Serial.println(packet.lon, 6);
-
-    Serial.print("Alt: ");
-    Serial.println(packet.alt, 2);
-
-    Serial.print("Sat: ");
-    Serial.println(packet.sat);
-
-    Serial.print("BME Temp: ");
-    Serial.println(packet.temp, 2);
-
-    Serial.print("BME Pressure: ");
-    Serial.println(packet.pressure, 2);
-
-    Serial.print("BME Humidity: ");
-    Serial.println(packet.humidity, 2);
-
-    sendToServer(packet);
+    updateEnvironmentalSensors();
+    sendRadioPacket();
   }
 }
 
-void connectWiFi() {
-  Serial.print("Conectando a WiFi");
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+void updateGPS() {
+  while (Serial2.available() > 0) {
+    gps.encode(Serial2.read());
   }
-
-  Serial.println("\nWiFi conectado");
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
 }
 
-void sendToServer(const TelemetryPacket& p) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi desconectado. Reintentando...");
-    connectWiFi();
-
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("No se pudo reconectar WiFi");
-      return;
-    }
-  }
-
-  String json = "{";
-  json += "\"lat\":" + String(p.lat, 6) + ",";
-  json += "\"lon\":" + String(p.lon, 6) + ",";
-  json += "\"alt\":" + String(p.alt, 2) + ",";
-  json += "\"sat\":" + String(p.sat) + ",";
-  json += "\"temp\":" + String(p.temp, 2) + ",";
-  json += "\"pressure\":" + String(p.pressure, 2) + ",";
-  json += "\"humidity\":" + String(p.humidity, 2);
-  json += "}";
-
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient http;
-  http.begin(client, serverUrl);
-  http.addHeader("Content-Type", "application/json");
-
-  Serial.println("Enviando JSON:");
-  Serial.println(json);
-
-  int httpCode = http.POST(json);
-
-  Serial.print("HTTP Response: ");
-  Serial.println(httpCode);
-
-  if (httpCode > 0) {
-    Serial.println(http.getString());
+void updateEnvironmentalSensors() {
+  if (bme.performReading()) {
+    lastBmeTemp  = bme.temperature;
+    lastPressure = bme.pressure / 100.0f;       // Pa -> hPa
+    lastHumidity = bme.humidity;
+    lastGas      = bme.gas_resistance / 1000.0f; // ohms -> KOhms
   } else {
-    Serial.print("Error HTTP: ");
-    Serial.println(http.errorToString(httpCode));
+    Serial.println("BME680 reading failed");
   }
 
-  http.end();
+  Serial.println("\n===== PAYLOAD SENSOR REPORT =====");
+
+  Serial.print("GPS valid: ");
+  Serial.println(gps.location.isValid() ? "yes" : "no");
+
+  Serial.print("BME680 Temp: ");
+  Serial.println(lastBmeTemp);
+
+  Serial.print("Pressure hPa: ");
+  Serial.println(lastPressure);
+
+  Serial.print("Humidity %: ");
+  Serial.println(lastHumidity);
+
+  Serial.print("Gas KOhms: ");
+  Serial.println(lastGas);
+}
+
+void sendRadioPacket() {
+  if (!gps.location.isValid()) {
+    Serial.println("GPS not valid yet, not sending nRF24 packet");
+    return;
+  }
+
+  packet.counter++;
+
+  packet.lat = gps.location.lat();
+  packet.lon = gps.location.lng();
+  packet.alt = gps.altitude.isValid() ? gps.altitude.meters() : 0.0f;
+  packet.sat = gps.satellites.isValid() ? gps.satellites.value() : 0;
+
+  packet.temp = isnan(lastBmeTemp) ? -999.0f : lastBmeTemp;
+  packet.pressure = isnan(lastPressure) ? -999.0f : lastPressure;
+  packet.humidity = isnan(lastHumidity) ? -999.0f : lastHumidity;
+
+  bool ok = radio.write(&packet, sizeof(packet));
+
+  Serial.print("nRF24 packet ");
+  Serial.print(packet.counter);
+  Serial.print(" size=");
+  Serial.print(sizeof(packet));
+  Serial.print(" bytes status: ");
+  Serial.println(ok ? "OK" : "FAIL");
 }
