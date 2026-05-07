@@ -35,9 +35,9 @@ app.post("/api/telemetry", (req, res) => {
     gas: data.gas ?? null,
 
     // IMU
-    roll: data.roll ?? null,
-    pitch: data.pitch ?? null,
-    yaw: data.yaw ?? null,
+    //roll: data.roll ?? null,
+    //pitch: data.pitch ?? null,
+    //yaw: data.yaw ?? null,
 
     // Time
     date: data.date || now.toISOString().split("T")[0],
@@ -50,7 +50,7 @@ app.post("/api/telemetry", (req, res) => {
     telemetryHistory.shift();
   }
 
-  console.log("📡 Stored:", entry);
+  console.log("Stored:", entry);
 
   res.status(200).json({ ok: true });
 });

@@ -7,30 +7,28 @@
 // =========================
 // WiFi + server
 // =========================
-const char* ssid = "Electronica";
-const char* password = "KIRCHHOFF24";
+const char* ssid = "Fernandez";
+const char* password = "16111505";
 const char* serverUrl = "https://cansat1.onrender.com/api/telemetry";
 
 // =========================
 // nRF24
 // =========================
-#define NRF_CE 25
-#define NRF_CSN 26
+#define NRF_CE 4
+#define NRF_CSN 5
 
 RF24 radio(NRF_CE, NRF_CSN);
 const byte address[6] = "GAAY1";
 
-// Must match transmitter struct exactly
 struct TelemetryPacket {
   uint32_t counter;
   float lat;
   float lon;
   float alt;
-  float temp;       // BME680 temperature
-  float pressure;   // BME680 pressure
-  float humidity;   // BME680 humidity
+  float temp;
+  float pressure;
+  float humidity;
   uint8_t sat;
-  uint8_t padding[3];
 };
 
 TelemetryPacket packet;
@@ -58,9 +56,6 @@ void setup() {
   radio.setAutoAck(true);
   radio.startListening();
 
-  Serial.print("Expected packet size: ");
-  Serial.println(sizeof(TelemetryPacket));
-
   Serial.println("Ground listo: nRF24 RX + HTTP POST");
 }
 
@@ -69,7 +64,6 @@ void loop() {
     radio.read(&packet, sizeof(packet));
 
     Serial.println("\n===== PACKET RECEIVED =====");
-
     Serial.print("Counter: ");
     Serial.println(packet.counter);
 
@@ -80,19 +74,19 @@ void loop() {
     Serial.println(packet.lon, 6);
 
     Serial.print("Alt: ");
-    Serial.println(packet.alt, 2);
+    Serial.println(packet.alt);
 
     Serial.print("Sat: ");
     Serial.println(packet.sat);
 
-    Serial.print("BME Temp: ");
-    Serial.println(packet.temp, 2);
+    Serial.print("Temp: ");
+    Serial.println(packet.temp);
 
-    Serial.print("BME Pressure: ");
-    Serial.println(packet.pressure, 2);
+    Serial.print("Pressure: ");
+    Serial.println(packet.pressure);
 
-    Serial.print("BME Humidity: ");
-    Serial.println(packet.humidity, 2);
+    Serial.print("Humidity: ");
+    Serial.println(packet.humidity);
 
     sendToServer(packet);
   }
@@ -116,11 +110,7 @@ void sendToServer(const TelemetryPacket& p) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi desconectado. Reintentando...");
     connectWiFi();
-
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("No se pudo reconectar WiFi");
-      return;
-    }
+    if (WiFi.status() != WL_CONNECTED) return;
   }
 
   String json = "{";
