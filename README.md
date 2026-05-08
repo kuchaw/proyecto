@@ -1,4 +1,5 @@
 Proyecto de la Escuela Secundaria de Educación Tecnica (ESETP) N°703 José Toschke de la ciudad de Puerto Madryn.
-Este proyecto final es del area de electronica y el grupo a relizar el proyecto está conformado por Lazcano Iñaki, Juan Gonzalez y Camina Santiago.
+Este proyecto final es del area de electronica y el grupo a relizar el proyecto está conformado por Iñaki Lazcano, Juan Gonzalez y Camina Santiago.
 El proyecto consta de un pequeño prototipo de satelite conocido como "CANSAT" diseñado para medir datos atmosfericos y participar en la competencia/muestra llevada a cabo por la UNSAM entre las fechas 24 y 27 de noviembre de 2026 en buenos aires.
 El objetivo del cansat es la medicion de datos (humedad, temperatura, presión atmosferica, altitud, longitud, latitud) y el aterrizaje seguro del mismo luego de ser desplegado de un dron a aproximadamente 100 metros. El cansat debe ser capaz de operar en diferentes modos y enviar telemetría a una estacion terrena que debe ser capaz de analizar y almacenar los datos para un posteior analisis
+
