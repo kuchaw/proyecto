@@ -163,7 +163,6 @@ void updateEnvironmentalSensors() {
 void sendRadioPacket() {
   if (!gps.location.isValid()) {
     Serial.println("GPS not valid yet, not sending nRF24 packet");
-    return;
   }
 
   packet.counter++;
