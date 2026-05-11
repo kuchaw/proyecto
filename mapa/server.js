@@ -31,7 +31,7 @@ app.post("/api/telemetry", (req, res) => {
     humidity: data.humidity ?? null,
 
     // Extra sensors
-    temp_bme: data.temp_bme ?? null,
+    //temp_bme: data.temp_bme ?? null,
     gas: data.gas ?? null,
 
     // IMU

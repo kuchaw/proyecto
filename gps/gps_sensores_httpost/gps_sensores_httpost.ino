@@ -7,8 +7,8 @@
 // =========================
 // WiFi + server
 // =========================
-const char* ssid = "PATOCAMINA";
-const char* password = "coco040707";
+const char* ssid = "Inaki ";
+const char* password = "bb21cbe07284";
 const char* serverUrl = "https://cansat1.onrender.com/api/telemetry";
 
 // =========================
