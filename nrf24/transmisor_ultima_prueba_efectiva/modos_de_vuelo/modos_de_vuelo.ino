@@ -8,7 +8,7 @@
 #include <Adafruit_BME680.h>
 #include <Adafruit_MPU6050.h>
 #include <TinyGPS++.h>
-
+#include <Adafruit_VL53L0X.h>
 HardwareSerial CamSerial(1);
 
 // =========================
@@ -47,6 +47,15 @@ TelemetryPacket packet;
 #define CAM_UART_TX 27
 
 TinyGPSPlus gps;
+
+// =========================
+// VL53L0X LiDAR
+// =========================
+Adafruit_VL53L0X lidar = Adafruit_VL53L0X();
+
+bool lidarOk = false;
+bool lidarValid = false;
+uint16_t lidarDistanceMm = 0;
 
 // =========================
 // MPU6050
@@ -97,6 +106,7 @@ void handlePrelaunch();
 void handleDescent();
 void handlePostImpact();
 void updateMPU6050();
+void updateLidar();
 // =========================
 // Mission modes
 // =========================
@@ -132,6 +142,15 @@ void setup() {
   // GPS UART
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
 
+  // LiDAR VL53L0X
+  if (!lidar.begin()) {
+    Serial.println("VL53L0X LiDAR not detected");
+    lidarOk = false; 
+  } else {
+    Serial.println("VL53L0X LiDAR detected");
+    lidarOk = true;
+  }
+
   // BME680
   if (!bme.begin(0x77)) {
     Serial.println("BME680 not found at 0x77, trying 0x76...");
@@ -153,10 +172,23 @@ void setup() {
   // nRF24 SPI
   SPI.begin(18, 19, 23, NRF_CSN);
 
-  if (!radio.begin()) {
-    Serial.println("nRF24 not detected");
-    while (1);
+  // MPU6050
+  if (!mpu.begin()) {
+  Serial.println("MPU6050 not detected");
+  mpuOk = false;
+  } else {
+    Serial.println("MPU6050 detected");
+    mpuOk = true;
+
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
   }
+
+    if (!radio.begin()) {
+      Serial.println("nRF24 not detected");
+      while (1);
+    }
 
   radio.openWritingPipe(address);
   radio.setChannel(108);
@@ -196,6 +228,10 @@ void handlePrelaunch() {
   Serial.println("\n===== PRELAUNCH MODE =====");
 
   updateEnvironmentalSensors();
+  updateMPU6050();
+  updateLidar();
+
+  
 
   bool gpsOk = gps.location.isValid() && gps.location.age() < 3000;
   bool bmeOk = !isnan(lastBmeTemp) && !isnan(lastPressure) && !isnan(lastHumidity);
@@ -205,6 +241,8 @@ void handlePrelaunch() {
 
   Serial.print("BME680 ready: ");
   Serial.println(bmeOk ? "YES" : "NO");
+
+  
 
   Serial.print("Prelaunch status: ");
   if (gpsOk && bmeOk) {
@@ -219,6 +257,7 @@ void handleDescent() {
   Serial.println("\n===== DESCENT MODE =====");
 
   updateEnvironmentalSensors();
+  updateMPU6050();
 
   sendRadioPacket();
 }
@@ -231,6 +270,80 @@ void updateGPS() {
   while (Serial2.available() > 0) {
     gps.encode(Serial2.read());
   }
+}
+
+void updateLidar() {
+  if (!lidarOk) {
+    Serial.println("LiDAR not available");
+    lidarValid = false;
+    return;
+  }
+
+  VL53L0X_RangingMeasurementData_t measure;
+
+  lidar.rangingTest(&measure, false);
+
+  if (measure.RangeStatus != 4) {
+    lidarDistanceMm = measure.RangeMilliMeter;
+    lidarValid = true;
+  } else {
+    lidarValid = false;
+  }
+
+  Serial.println("\n===== LIDAR REPORT =====");
+
+  Serial.print("LiDAR valid: ");
+  Serial.println(lidarValid ? "YES" : "NO");
+
+  Serial.print("Distance mm: ");
+  if (lidarValid) {
+    Serial.println(lidarDistanceMm);
+  } else {
+    Serial.println("out of range / invalid");
+  }
+}
+
+
+void updateMPU6050() {
+  if (!mpuOk) {
+    Serial.println("MPU6050 not available");
+    return;
+  }
+
+  sensors_event_t accelEvent;
+  sensors_event_t gyroEvent;
+  sensors_event_t tempEvent;
+
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+
+  ax = accelEvent.acceleration.x;
+  ay = accelEvent.acceleration.y;
+  az = accelEvent.acceleration.z;
+
+  gx = gyroEvent.gyro.x;
+  gy = gyroEvent.gyro.y;
+  gz = gyroEvent.gyro.z;
+
+  accelTotal = sqrt((ax * ax) + (ay * ay) + (az * az));
+
+  Serial.println("\n===== MPU6050 REPORT =====");
+
+  Serial.print("Accel m/s^2: ");
+  Serial.print(ax);
+  Serial.print(", ");
+  Serial.print(ay);
+  Serial.print(", ");
+  Serial.println(az);
+
+  Serial.print("Gyro rad/s: ");
+  Serial.print(gx);
+  Serial.print(", ");
+  Serial.print(gy);
+  Serial.print(", ");
+  Serial.println(gz);
+
+  Serial.print("Accel total m/s^2: ");
+  Serial.println(accelTotal);
 }
 
 void updateEnvironmentalSensors() {
@@ -317,3 +430,4 @@ else {
   Serial.print(" bytes status: ");
   Serial.println(ok ? "OK" : "FAIL");
 }
+
