@@ -5,7 +5,8 @@
 #include <math.h>
 
 #include <Adafruit_Sensor.h>
-#include <Adafruit_BME280.h>
+#include <Adafruit_BME680.h>
+#include <Adafruit_MPU6050.h>
 #include <TinyGPS++.h>
 
 HardwareSerial CamSerial(1);
@@ -40,15 +41,33 @@ TelemetryPacket packet;
 #define RXD2 16
 #define TXD2 17
 
+//cam
+
 #define CAM_UART_RX 14
 #define CAM_UART_TX 27
 
 TinyGPSPlus gps;
 
 // =========================
+// MPU6050
+// =========================
+Adafruit_MPU6050 mpu;
+
+float ax = NAN;
+float ay = NAN;
+float az = NAN;
+
+float gx = NAN;
+float gy = NAN;
+float gz = NAN;
+
+float accelTotal = NAN;
+bool mpuOk = false;
+
+// =========================
 // BME680
 // =========================
-Adafruit_BME280 bme;
+Adafruit_BME680 bme;
 
 float lastBmeTemp = NAN;
 float lastPressure = NAN;
@@ -77,6 +96,7 @@ void sendRadioPacket();
 void handlePrelaunch();
 void handleDescent();
 void handlePostImpact();
+void updateMPU6050();
 // =========================
 // Mission modes
 // =========================

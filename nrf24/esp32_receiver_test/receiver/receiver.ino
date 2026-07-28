@@ -7,11 +7,10 @@
 // =========================
 // WiFi + server
 // =========================
-const char* ssid = "";
-const char* password = "";
+const char* ssid = "sf2026";
+const char* password = "16111505";
 
-const char* serverUrl =
-  "https://cansat1.onrender.com/api/telemetry";
+const char* serverUrl = "https://cansat1.onrender.com/api/telemetry";
 
 // =========================
 // nRF24
