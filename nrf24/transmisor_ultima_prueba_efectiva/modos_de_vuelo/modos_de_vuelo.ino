@@ -33,6 +33,35 @@ struct TelemetryPacket {
   uint8_t padding[3];
 };
 
+struct __attribute__((packed)) TelemetryAttitudePacket {
+  uint8_t packetType;      // PACKET_ATTITUDE
+  uint8_t version;         // packet format version
+
+  uint32_t counter;        // packet counter
+  uint32_t time_ms;        // time since mission start
+
+  uint16_t lidar_mm;       // LiDAR distance in millimeters
+
+  int16_t roll_deg10;      // roll angle * 10
+  int16_t pitch_deg10;     // pitch angle * 10
+  int16_t yaw_deg10;       // yaw angle * 10
+
+  uint8_t mode;            // mission mode
+  uint8_t lidar_status;    // 0 invalid, 1 valid
+  uint8_t mpu_status;      // 0 invalid, 1 valid
+
+  uint8_t reserved[11];    // keep packet at 32 bytes
+};
+
+static_assert(sizeof(TelemetryAttitudePacket) == 32, "TelemetryAttitudePacket must be 32 bytes");
+
+
+enum PacketType : uint8_t {
+  PACKET_CORE = 1,
+  PACKET_ATTITUDE = 2
+};
+
+const uint8_t PACKET_VERSION = 1;
 TelemetryPacket packet;
 
 // =========================
@@ -69,6 +98,15 @@ float az = NAN;
 float gx = NAN;
 float gy = NAN;
 float gz = NAN;
+
+float rollDeg = NAN;
+float pitchDeg = NAN;
+float yawDeg = 0.0f;
+
+bool mpuValid = false;
+bool mpuAngleInitialized = false;
+
+unsigned long lastMpuAngleMs = 0;
 
 float accelTotal = NAN;
 bool mpuOk = false;
@@ -107,6 +145,7 @@ void handleDescent();
 void handlePostImpact();
 void updateMPU6050();
 void updateLidar();
+void sendTelemetryCycle();
 // =========================
 // Mission modes
 // =========================
@@ -124,6 +163,11 @@ unsigned long modeStartMs = 0;
 void setMissionMode(MissionMode newMode) {
   currentMode = newMode;
   modeStartMs = millis();
+}
+
+void sendTelemetryCycle() {
+  sendRadioPacket();      // existing CORE packet
+  sendAttitudePacket();   // new LiDAR + MPU packet
 }
 
 void setup() {
@@ -250,8 +294,7 @@ void handlePrelaunch() {
   } else {
     Serial.println("NOT READY");
   }
-
-  sendRadioPacket();
+  sendTelemetryCycle();
 }
 void handleDescent() {
   Serial.println("\n===== DESCENT MODE =====");
@@ -259,11 +302,11 @@ void handleDescent() {
   updateEnvironmentalSensors();
   updateMPU6050();
 
-  sendRadioPacket();
+  sendTelemetryCycle();
 }
 void handlePostImpact() {
   Serial.println("\n===== POST IMPACT MODE =====");
-  sendRadioPacket();
+  sendTelemetryCycle();
 }
 
 void updateGPS() {
@@ -373,6 +416,82 @@ void updateEnvironmentalSensors() {
   Serial.print("Gas KOhms: ");
   Serial.println(lastGas);
 }
+void updateMPUAngles() {
+  if (!mpuOk) {
+    mpuValid = false;
+    return;
+  }
+
+  sensors_event_t accelEvent;
+  sensors_event_t gyroEvent;
+  sensors_event_t tempEvent;
+
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+
+  unsigned long now = millis();
+
+  float dt = 0.0f;
+  if (lastMpuAngleMs != 0) {
+    dt = (now - lastMpuAngleMs) / 1000.0f;
+  }
+
+  lastMpuAngleMs = now;
+
+  float ax = accelEvent.acceleration.x;
+  float ay = accelEvent.acceleration.y;
+  float az = accelEvent.acceleration.z;
+
+  float gyroXDegS = gyroEvent.gyro.x * 57.2957795f;
+  float gyroYDegS = gyroEvent.gyro.y * 57.2957795f;
+  float gyroZDegS = gyroEvent.gyro.z * 57.2957795f;
+
+  float accRollDeg = atan2f(ay, az) * 180.0f / PI;
+  float accPitchDeg = atan2f(-ax, sqrtf((ay * ay) + (az * az))) * 180.0f / PI;
+
+  if (!mpuAngleInitialized || dt <= 0.0f || dt > 1.0f) {
+    rollDeg = accRollDeg;
+    pitchDeg = accPitchDeg;
+    yawDeg = 0.0f;
+    mpuAngleInitialized = true;
+  } else {
+    rollDeg = 0.98f * (rollDeg + gyroXDegS * dt) + 0.02f * accRollDeg;
+    pitchDeg = 0.98f * (pitchDeg + gyroYDegS * dt) + 0.02f * accPitchDeg;
+    yawDeg += gyroZDegS * dt;
+  }
+
+  while (yawDeg > 180.0f) yawDeg -= 360.0f;
+  while (yawDeg < -180.0f) yawDeg += 360.0f;
+
+  mpuValid = isfinite(rollDeg) && isfinite(pitchDeg) && isfinite(yawDeg);
+
+  Serial.println("\n===== MPU ANGLE REPORT =====");
+
+  Serial.print("Roll deg: ");
+  Serial.println(rollDeg);
+
+  Serial.print("Pitch deg: ");
+  Serial.println(pitchDeg);
+
+  Serial.print("Yaw deg: ");
+  Serial.println(yawDeg);
+
+  Serial.print("MPU valid: ");
+  Serial.println(mpuValid ? "YES" : "NO");
+}
+
+int16_t angleToDeg10(float angleDeg) {
+  if (!isfinite(angleDeg)) {
+    return -32768;
+  }
+
+  float scaled = angleDeg * 10.0f;
+
+  if (scaled > 32767.0f) scaled = 32767.0f;
+  if (scaled < -32767.0f) scaled = -32767.0f;
+
+  return (int16_t)lroundf(scaled);
+}
+
 
 void sendRadioPacket() {
 
@@ -417,7 +536,7 @@ else {
 
   packet.padding[0] = (uint8_t)currentMode;
   packet.padding[1] = gpsOk ? 1 : 0;
-  packet.padding[2] = 0;
+  packet.padding[2] = PACKET_CORE;
 
   bool ok = radio.write(&packet, sizeof(packet));
 
@@ -431,3 +550,45 @@ else {
   Serial.println(ok ? "OK" : "FAIL");
 }
 
+void sendAttitudePacket() {
+  TelemetryAttitudePacket attitude;
+
+  attitude.packetType = PACKET_ATTITUDE;
+  attitude.version = PACKET_VERSION;
+
+  attitude.counter = packet.counter;
+  attitude.time_ms = millis() - missionStartMs;
+
+  attitude.lidar_mm = lidarValid ? lidarDistanceMm : 0;
+
+  attitude.roll_deg10 = angleToDeg10(rollDeg);
+  attitude.pitch_deg10 = angleToDeg10(pitchDeg);
+  attitude.yaw_deg10 = angleToDeg10(yawDeg);
+
+  attitude.mode = (uint8_t)currentMode;
+  attitude.lidar_status = lidarValid ? 1 : 0;
+  attitude.mpu_status = mpuValid ? 1 : 0;
+
+  for (int i = 0; i < 11; i++) {
+    attitude.reserved[i] = 0;
+  }
+
+  bool ok = radio.write(&attitude, sizeof(attitude));
+
+  CamSerial.write((uint8_t *)&attitude, sizeof(attitude));
+
+  Serial.print("ATTITUDE packet ");
+  Serial.print(attitude.counter);
+  Serial.print(" time_ms=");
+  Serial.print(attitude.time_ms);
+  Serial.print(" lidar=");
+  Serial.print(attitude.lidar_mm);
+  Serial.print(" roll=");
+  Serial.print(attitude.roll_deg10 / 10.0f);
+  Serial.print(" pitch=");
+  Serial.print(attitude.pitch_deg10 / 10.0f);
+  Serial.print(" yaw=");
+  Serial.print(attitude.yaw_deg10 / 10.0f);
+  Serial.print(" status: ");
+  Serial.println(ok ? "OK" : "FAIL");
+}
