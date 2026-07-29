@@ -35,6 +35,8 @@ struct TelemetryPacket {
   uint8_t padding[3];
 };
 
+
+
 static_assert(
   sizeof(TelemetryPacket) == 32,
   "TelemetryPacket must be exactly 32 bytes"

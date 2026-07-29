@@ -21,7 +21,7 @@ RF24 radio(NRF_CE, NRF_CSN);
 const byte address[6] = "GAAY1";
 
 // Keep packet explicitly 32 bytes for nRF24 compatibility
-struct TelemetryPacket {
+/*struct TelemetryPacket {
   uint32_t counter;
   float lat;
   float lon;
@@ -31,6 +31,24 @@ struct TelemetryPacket {
   float humidity;
   uint8_t sat;
   uint8_t padding[3];
+};*/
+
+struct __attribute__((packed)) TelemetryPacket {
+  uint8_t packetType;
+  uint8_t version;
+
+  uint32_t counter;
+  uint32_t time_ms;
+
+  float lat;
+  float lon;
+  float alt;
+  float temp;
+  float pressure;
+  float humidity;
+
+  uint8_t sat;
+  uint8_t reserved[1];
 };
 
 struct __attribute__((packed)) TelemetryAttitudePacket {
@@ -273,6 +291,7 @@ void handlePrelaunch() {
 
   updateEnvironmentalSensors();
   updateMPU6050();
+  updateMPUAngles();
   updateLidar();
 
   

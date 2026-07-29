@@ -14,12 +14,18 @@
 
 #include "camera_pins.h"
 
-const char * photoPrefix = "/photo_";
+const char * photoPrefix = "/photos/photo_";
 const char * missionLogPath = "/logs/mission.csv";
 const char * eventLogPath = "/logs/events.txt";
+const char *attitudeLogPath = "/logs/attitude.csv";
+
+#define PACKET_ENVIRONMENT 1
+#define PACKET_ATTITUDE    2
+#define PACKET_VERSION     1
+#define UART_PACKET_SIZE   32
 
 int photoNumber = 0;
-struct TelemetryPacket {
+/*struct TelemetryPacket {
   uint32_t counter;
   float lat;
   float lon;
@@ -29,6 +35,39 @@ struct TelemetryPacket {
   float humidity;
   uint8_t sat;
   uint8_t padding[3];
+};*/
+
+struct __attribute__((packed)) TelemetryPacket {
+  uint8_t packetType;
+  uint8_t version;
+
+  uint32_t counter;
+  uint32_t time_ms;
+
+  float lat;
+  float lon;
+  float alt;
+  float temp;
+  float pressure;
+  float humidity;
+
+  uint8_t sat;
+  uint8_t reserved[1];
+};
+
+struct __attribute__((packed)) TelemetryAttitudePacket {
+  uint8_t packetType;      
+  uint8_t version;         
+  uint32_t counter;         
+  uint32_t time_ms;        
+  uint16_t lidar_mm;       
+  int16_t roll_deg10;      
+  int16_t pitch_deg10;     
+  int16_t yaw_deg10;       
+  uint8_t mode;            
+  uint8_t lidar_status;    
+  uint8_t mpu_status;      
+  uint8_t reserved[11];    
 };
 
 bool appendTelemetryRow(const TelemetryPacket &p) {
@@ -67,10 +106,49 @@ bool appendTelemetryRow(const TelemetryPacket &p) {
   return true;
 }
 
+bool appendAttitudeRow(const TelemetryAttitudePacket &p) {
+  File file = SD_MMC.open(attitudeLogPath, FILE_APPEND);
 
+  if (!file) {
+    Serial.println("Failed to open attitude.csv for appending");
+    return false;
+  }
 
-bool appendTelemetryRow(const TelemetryPacket& p);
+  file.print(p.packetType);
+  file.print(",");
 
+  file.print(p.version);
+  file.print(",");
+
+  file.print(p.counter);
+  file.print(",");
+
+  file.print(p.time_ms);
+  file.print(",");
+
+  file.print(p.lidar_mm);
+  file.print(",");
+
+  file.print(p.roll_deg10 / 10.0, 1);
+  file.print(",");
+
+  file.print(p.pitch_deg10 / 10.0, 1);
+  file.print(",");
+
+  file.print(p.yaw_deg10 / 10.0, 1);
+  file.print(",");
+
+  file.print(p.mode);
+  file.print(",");
+
+  file.print(p.lidar_status);
+  file.print(",");
+
+  file.println(p.mpu_status);
+
+  file.close();
+  return true;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -179,48 +257,92 @@ void setup() {
   }else{
     Serial.println("/logs/mission.csv ya existe");
   }
+
+  if (!SD_MMC.exists("/logs/telemetry.csv")) {
+  File file = SD_MMC.open("/logs/telemetry.csv", FILE_WRITE);
+
+  if (file) {
+    file.println("counter,lat,lon,alt,temp,pressure,humidity,sat");
+    file.close();
+    } 
+  }
+
+  if (!SD_MMC.exists(attitudeLogPath)) {
+  File file = SD_MMC.open(attitudeLogPath, FILE_WRITE);
+
+  if (file) {
+    file.println("packetType,version,counter,time_ms,lidar_mm,roll_deg,pitch_deg,yaw_deg,mode,lidar_status,mpu_status");
+    file.close();
+  }
+}
+}
+
+void handleTelemetry() {
+  int packetsHandled = 0;
+  const int maxPacketsPerLoop = 5;
+
+  while (Serial.available() >= UART_PACKET_SIZE && packetsHandled < maxPacketsPerLoop) {
+    uint8_t buffer[UART_PACKET_SIZE];
+
+    int bytesRead = Serial.readBytes(
+      (char *)buffer,
+      UART_PACKET_SIZE
+    );
+
+    if (bytesRead == UART_PACKET_SIZE) {
+      uint8_t packetType = buffer[0];
+
+      if (packetType == PACKET_ATTITUDE) {
+        TelemetryAttitudePacket attitudePacket;
+        memcpy(&attitudePacket, buffer, sizeof(attitudePacket));
+        appendAttitudeRow(attitudePacket);
+      }
+
+      else if (packetType == PACKET_ENVIRONMENT) {
+        TelemetryPacket telemetryPacket;
+        memcpy(&telemetryPacket, buffer, sizeof(telemetryPacket));
+        appendTelemetryRow(telemetryPacket);
+      }
+
+      else {
+        Serial.print("Unknown packet type: ");
+        Serial.println(packetType);
+      }
+    }
+
+    packetsHandled++;
+  }
 }
 
 void loop() {
-  camera_fb_t * fb = NULL;
-  fb = esp_camera_fb_get();
+  handleTelemetry();
+
+  camera_fb_t * fb = esp_camera_fb_get();
+
   if (!fb) {
     Serial.println("Camera capture failed");
+    delay(5000);
     return;
   }
 
-  String photoFileName = photoPrefix + String(photoNumber) + ".jpg";
-  fs::FS & fs = SD_MMC;
+  String photoFileName = String(photoPrefix) + String(photoNumber) + ".jpg";
   Serial.printf("Picture file name: %s\n", photoFileName.c_str());
 
-  File file = fs.open(photoFileName.c_str(), FILE_WRITE);
+  File file = SD_MMC.open(photoFileName.c_str(), FILE_WRITE);
+
   if (!file) {
     Serial.println("Failed to open file in writing mode");
   } else {
-    file.write(fb -> buf, fb -> len);
+    file.write(fb->buf, fb->len);
+    file.close();
+
     Serial.printf("Saved file to path: %s\n", photoFileName.c_str());
     ++photoNumber;
   }
 
-  if (Serial.available() >= sizeof(TelemetryPacket)) {
-  TelemetryPacket packet;
-
-  int bytesRead = Serial.readBytes(
-    (char *)&packet,
-    sizeof(packet)
-  );
-
-  if (bytesRead == sizeof(packet)) {
-    appendTelemetryRow(packet);
-  }
-}
-
-
-
-
-
-  file.close();
   esp_camera_fb_return(fb);
+
+  handleTelemetry();
 
   delay(5000);
 }
