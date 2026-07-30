@@ -23,18 +23,44 @@ RF24 radio(NRF_CE, NRF_CSN);
 const byte address[6] = "GAAY1";
 
 // Must match modos_de_vuelo.ino exactly
-struct TelemetryPacket {
+struct __attribute__((packed)) TelemetryPacket {
+  uint8_t packetType;
+  uint8_t version;
+
   uint32_t counter;
+  uint32_t time_ms;
+
   float lat;
   float lon;
   float alt;
   float temp;
   float pressure;
   float humidity;
+
   uint8_t sat;
-  uint8_t padding[3];
+  uint8_t reserved[1];
 };
 
+
+struct __attribute__((packed)) TelemetryAttitudePacket {
+  uint8_t packetType;      // PACKET_ATTITUDE
+  uint8_t version;         // packet format version
+
+  uint32_t counter;        // packet counter
+  uint32_t time_ms;        // time since mission start
+
+  uint16_t lidar_mm;       // LiDAR distance in millimeters
+
+  int16_t roll_deg10;      // roll angle * 10
+  int16_t pitch_deg10;     // pitch angle * 10
+  int16_t yaw_deg10;       // yaw angle * 10
+
+  uint8_t mode;            // mission mode
+  uint8_t lidar_status;    // 0 invalid, 1 valid
+  uint8_t mpu_status;      // 0 invalid, 1 valid
+
+  uint8_t reserved[11];    // keep packet at 32 bytes
+};
 
 
 static_assert(
