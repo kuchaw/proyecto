@@ -7,8 +7,8 @@
 // =========================
 // WiFi + server
 // =========================
-const char* ssid = "Sf2026";
-const char* password = "16111505";
+const char* ssid = "LaboPLC";
+const char* password = "link1982";
 
 const char* serverUrl = "https://cansat1.onrender.com/api/telemetry";
 
@@ -28,7 +28,7 @@ struct __attribute__((packed)) TelemetryPacket {
   uint8_t version;
 
   uint32_t counter;
-  uint32_t time_ms;
+  //uint32_t time_ms;
 
   float lat;
   float lon;
@@ -59,7 +59,7 @@ struct __attribute__((packed)) TelemetryAttitudePacket {
   uint8_t lidar_status;    // 0 invalid, 1 valid
   uint8_t mpu_status;      // 0 invalid, 1 valid
 
-  uint8_t reserved[11];    // keep packet at 32 bytes
+  uint8_t reserved[1];    // keep packet at 32 bytes
 };
 
 
@@ -133,12 +133,28 @@ void loop() {
     Serial.print("Humidity: ");
     Serial.println(packet.humidity, 2);
 
-    Serial.print("Mission mode: ");
-    Serial.println(packet.padding[0]);
+    Serial.print("counter: ");
+    Serial.println(packet.counter, 2);
 
-    Serial.print("GPS status: ");
-    Serial.println(packet.padding[1]);
+    Serial.print("time: ");
+    Serial.println(packet.time_ms, 2);
+    
+    Serial.print("roll: ");
+    Serial.println(packet.eoll_deg10, 2);
 
+    Serial.print("pitch: ");
+    Serial.println(packet.pitch_deg10, 2);
+
+    Serial.print("yaw_deg10: ");
+    Serial.println(packet.yaw_deg10, 2);
+    
+    Serial.print("mission mode: ");
+    Serial.println(packet.mode, 2);
+
+    Serial.print("lidar mm: ");
+    Serial.println(packet.lidar_mm, 2);
+
+  ;        
     sendToServer(packet);
   }
 }
@@ -147,7 +163,7 @@ void connectWiFi() {
   Serial.print("Connecting to WiFi");
 
   WiFi.begin(ssid, password);
-
+  
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
