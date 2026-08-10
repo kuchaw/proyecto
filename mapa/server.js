@@ -17,6 +17,14 @@ app.post("/api/telemetry", (req, res) => {
   const now = new Date();
 
   const entry = {
+    packetType: data.packetType ?? null,
+    version: data.version ?? null,
+    counter: data.counter ?? null,
+    mode: data.mode ?? null,
+    lidar_status: data.lidar_status ?? null,
+    mpu_status: data.mpu_status ?? null,
+    mission_time_ms: data.time_ms ?? data.mission_time_ms ?? null,
+
     // GPS
     lat: data.lat ?? null,
     lon: data.lon ?? null,
@@ -24,7 +32,7 @@ app.post("/api/telemetry", (req, res) => {
     sat: data.sat ?? null,
     speed: data.speed ?? null,
     course: data.course ?? null,
-
+    lidar_mm: data.lidar_mm ?? null,
     // Main environment fields used by current HTML
     temp: data.temp ?? null,
     pressure: data.pressure ?? null,
@@ -35,10 +43,9 @@ app.post("/api/telemetry", (req, res) => {
     gas: data.gas ?? null,
 
     // IMU
-    //roll: data.roll ?? null,
-    //pitch: data.pitch ?? null,
-    //yaw: data.yaw ?? null,
-
+    roll: data.roll_deg10 != null ? data.roll_deg10 / 10 : null,
+    pitch: data.pitch_deg10 != null ? data.pitch_deg10 / 10 : null,
+    yaw: data.yaw_deg10 != null ? data.yaw_deg10 / 10 : null,
     // Time
     date: data.date || now.toISOString().split("T")[0],
     time: data.time || now.toTimeString().split(" ")[0]
