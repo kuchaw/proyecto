@@ -1,6 +1,9 @@
 #include "esp_camera.h"
 #include "SD_MMC.h"
 #include "FS.h"
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 
 // Select camera model
 //#define CAMERA_MODEL_WROVER_KIT // Has PSRAM
@@ -22,7 +25,17 @@ const char *attitudeLogPath = "/logs/attitude.csv";
 #define PACKET_ENVIRONMENT 1
 #define PACKET_ATTITUDE    2
 #define PACKET_VERSION     1
-#define UART_PACKET_SIZE   32
+
+// ESP-NOW
+#define ESPNOW_CHANNEL 1
+
+// Broadcast is used until the ground-station MAC is fixed.
+// Both devices must use the same WiFi channel.
+uint8_t groundStationAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+bool espNowReady = false;
+unsigned long lastPhotoMs = 0;
+const unsigned long photoIntervalMs = 5000;
 
 int photoNumber = 0;
 /*struct TelemetryPacket {
@@ -69,6 +82,61 @@ struct __attribute__((packed)) TelemetryAttitudePacket {
   uint8_t mpu_status;      
   uint8_t reserved[11];    
 };
+
+static_assert(sizeof(TelemetryPacket) == 36, "TelemetryPacket must be 36 bytes");
+static_assert(sizeof(TelemetryAttitudePacket) == 32, "TelemetryAttitudePacket must be 32 bytes");
+
+bool initEspNow() {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+
+  esp_err_t channelResult = esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  if (channelResult != ESP_OK) {
+    Serial.print("Failed to set ESP-NOW channel: ");
+    Serial.println(channelResult);
+    return false;
+  }
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW initialization failed");
+    return false;
+  }
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, groundStationAddress, 6);
+  peerInfo.channel = ESPNOW_CHANNEL;
+  peerInfo.encrypt = false;
+  peerInfo.ifidx = WIFI_IF_STA;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add ESP-NOW ground-station peer");
+    return false;
+  }
+
+  Serial.print("ESP-NOW ready on channel ");
+  Serial.println(ESPNOW_CHANNEL);
+  Serial.print("ESP32-CAM STA MAC: ");
+  Serial.println(WiFi.macAddress());
+
+  espNowReady = true;
+  return true;
+}
+
+bool sendPacketEspNow(const uint8_t *data, size_t length) {
+  if (!espNowReady) {
+    return false;
+  }
+
+  esp_err_t result = esp_now_send(groundStationAddress, data, length);
+
+  if (result != ESP_OK) {
+    Serial.print("ESP-NOW send error: ");
+    Serial.println(result);
+    return false;
+  }
+
+  return true;
+}
 
 bool appendTelemetryRow(const TelemetryPacket &p) {
   File file = SD_MMC.open("/logs/telemetry.csv", FILE_APPEND);
@@ -275,40 +343,62 @@ void setup() {
     file.close();
   }
 }
+
+  if (!initEspNow()) {
+    Serial.println("ESP-NOW unavailable; SD logging and camera will continue");
+  }
 }
 
 void handleTelemetry() {
   int packetsHandled = 0;
   const int maxPacketsPerLoop = 5;
 
-  while (Serial.available() >= UART_PACKET_SIZE && packetsHandled < maxPacketsPerLoop) {
-    uint8_t buffer[UART_PACKET_SIZE];
+  while (Serial.available() > 0 && packetsHandled < maxPacketsPerLoop) {
+    uint8_t packetType = (uint8_t)Serial.peek();
+    size_t packetSize = 0;
 
-    int bytesRead = Serial.readBytes(
+    if (packetType == PACKET_ENVIRONMENT) {
+      packetSize = sizeof(TelemetryPacket);
+    }
+    else if (packetType == PACKET_ATTITUDE) {
+      packetSize = sizeof(TelemetryAttitudePacket);
+    }
+    else {
+      Serial.read();
+      Serial.print("Unknown UART packet type: ");
+      Serial.println(packetType);
+      continue;
+    }
+
+    if ((size_t)Serial.available() < packetSize) {
+      break;
+    }
+
+    uint8_t buffer[sizeof(TelemetryPacket)];
+
+    size_t bytesRead = Serial.readBytes(
       (char *)buffer,
-      UART_PACKET_SIZE
+      packetSize
     );
 
-    if (bytesRead == UART_PACKET_SIZE) {
-      uint8_t packetType = buffer[0];
-
-      if (packetType == PACKET_ATTITUDE) {
-        TelemetryAttitudePacket attitudePacket;
-        memcpy(&attitudePacket, buffer, sizeof(attitudePacket));
-        appendAttitudeRow(attitudePacket);
-      }
-
-      else if (packetType == PACKET_ENVIRONMENT) {
-        TelemetryPacket telemetryPacket;
-        memcpy(&telemetryPacket, buffer, sizeof(telemetryPacket));
-        appendTelemetryRow(telemetryPacket);
-      }
-
-      else {
-        Serial.print("Unknown packet type: ");
-        Serial.println(packetType);
-      }
+    if (bytesRead != packetSize) {
+      Serial.println("Incomplete UART telemetry packet");
+      break;
     }
+
+    if (packetType == PACKET_ATTITUDE) {
+      TelemetryAttitudePacket attitudePacket;
+      memcpy(&attitudePacket, buffer, sizeof(attitudePacket));
+      appendAttitudeRow(attitudePacket);
+    }
+    else if (packetType == PACKET_ENVIRONMENT) {
+      TelemetryPacket telemetryPacket;
+      memcpy(&telemetryPacket, buffer, sizeof(telemetryPacket));
+      appendTelemetryRow(telemetryPacket);
+    }
+
+    // Forward exactly the same telemetry packet received by UART.
+    sendPacketEspNow(buffer, packetSize);
 
     packetsHandled++;
   }
@@ -317,11 +407,18 @@ void handleTelemetry() {
 void loop() {
   handleTelemetry();
 
+  unsigned long now = millis();
+  if (lastPhotoMs != 0 && now - lastPhotoMs < photoIntervalMs) {
+    delay(1);
+    return;
+  }
+
+  lastPhotoMs = now;
+
   camera_fb_t * fb = esp_camera_fb_get();
 
   if (!fb) {
     Serial.println("Camera capture failed");
-    delay(5000);
     return;
   }
 
@@ -343,6 +440,4 @@ void loop() {
   esp_camera_fb_return(fb);
 
   handleTelemetry();
-
-  delay(5000);
 }

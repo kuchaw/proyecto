@@ -1,7 +1,6 @@
 
+#
 #include <Wire.h>
-#include <SPI.h>
-#include <RF24.h>
 #include <math.h>
 
 #include <Adafruit_Sensor.h>
@@ -10,28 +9,6 @@
 #include <TinyGPS++.h>
 #include <Adafruit_VL53L0X.h>
 HardwareSerial CamSerial(1);
-
-// =========================
-// nRF24
-// =========================
-#define NRF_CE 25
-#define NRF_CSN 26
-
-RF24 radio(NRF_CE, NRF_CSN);
-const byte address[6] = "GAAY1";
-
-// Keep packet explicitly 32 bytes for nRF24 compatibility
-/*struct TelemetryPacket {
-  uint32_t counter;
-  float lat;
-  float lon;
-  float alt;
-  float temp;
-  float pressure;
-  float humidity;
-  uint8_t sat;
-  uint8_t padding[3];
-};*/
 
 struct __attribute__((packed)) TelemetryPacket {
   uint8_t packetType;
@@ -157,7 +134,7 @@ const unsigned long sendIntervalMs = 750;
 // =========================
 void updateGPS();
 void updateEnvironmentalSensors();
-void sendRadioPacket();
+void sendCorePacket();
 void handlePrelaunch();
 void handleDescent();
 void handlePostImpact();
@@ -184,7 +161,7 @@ void setMissionMode(MissionMode newMode) {
 }
 
 void sendTelemetryCycle() {
-  sendRadioPacket();      // existing CORE packet
+  sendCorePacket();       // CORE packet -> ESP32-CAM by UART
   sendAttitudePacket();   // new LiDAR + MPU packet
 }
 
@@ -231,9 +208,6 @@ void setup() {
 
   Serial.println("BME680 detected");
 
-  // nRF24 SPI
-  SPI.begin(18, 19, 23, NRF_CSN);
-
   // MPU6050
   if (!mpu.begin()) {
   Serial.println("MPU6050 not detected");
@@ -247,24 +221,13 @@ void setup() {
     mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
   }
 
-    if (!radio.begin()) {
-      Serial.println("nRF24 not detected");
-      while (1);
-    }
-
-  radio.openWritingPipe(address);
-  radio.setChannel(108);
-  radio.setDataRate(RF24_250KBPS);
-  radio.setPALevel(RF24_PA_LOW);
-  radio.setAutoAck(true);
-  radio.stopListening();
-
+  packet.packetType = PACKET_CORE;
+  packet.version = PACKET_VERSION;
   packet.counter = 0;
-  packet.padding[0] = 0;
-  packet.padding[1] = 0;
-  packet.padding[2] = 0;
+  packet.time_ms = 0;
+  packet.reserved[0] = 0;
 
-  Serial.println("Payload ready: GPS + BME680 + nRF24 TX");
+  Serial.println("Payload ready: sensors + UART to ESP32-CAM");
 }
 
 void loop() {
@@ -512,7 +475,7 @@ int16_t angleToDeg10(float angleDeg) {
 }
 
 
-void sendRadioPacket() {
+void sendCorePacket() {
 
   bool gpsOk = gps.location.isValid() && gps.location.age() < 3000;
 
@@ -530,7 +493,7 @@ if (gpsOk) {
   lastKnownSat = packet.sat;
   hasLastKnownGps = true;
 
-  packet.padding[1] = 1;  // current GPS valid
+  packet.reserved[0] = 1;  // current GPS valid
 } 
 else if (hasLastKnownGps) {
   packet.lat = lastKnownLat;
@@ -538,7 +501,7 @@ else if (hasLastKnownGps) {
   packet.alt = lastKnownAlt;
   packet.sat = lastKnownSat;
 
-  packet.padding[1] = 2;  // using last known GPS
+  packet.reserved[0] = 2;  // using last known GPS
 } 
 else {
   packet.lat = 0.0f;
@@ -546,27 +509,25 @@ else {
   packet.alt = 0.0f;
   packet.sat = 0;
 
-  packet.padding[1] = 0;  // no GPS available
+  packet.reserved[0] = 0;  // no GPS available
 }
 
   packet.temp = isnan(lastBmeTemp) ? -999.0f : lastBmeTemp;
   packet.pressure = isnan(lastPressure) ? -999.0f : lastPressure;
   packet.humidity = isnan(lastHumidity) ? -999.0f : lastHumidity;
 
-  packet.padding[0] = (uint8_t)currentMode;
-  packet.padding[1] = gpsOk ? 1 : 0;
-  packet.padding[2] = PACKET_CORE;
+  packet.packetType = PACKET_CORE;
+  packet.version = PACKET_VERSION;
+  packet.time_ms = millis() - missionStartMs;
 
-  bool ok = radio.write(&packet, sizeof(packet));
+  size_t bytesSent = CamSerial.write((uint8_t *)&packet, sizeof(packet));
 
-  CamSerial.write((uint8_t *)&packet, sizeof(packet));
-
-  Serial.print("nRF24 packet ");
+  Serial.print("UART CORE packet ");
   Serial.print(packet.counter);
   Serial.print(" size=");
   Serial.print(sizeof(packet));
-  Serial.print(" bytes status: ");
-  Serial.println(ok ? "OK" : "FAIL");
+  Serial.print(" bytes sent=");
+  Serial.println(bytesSent);
 }
 
 void sendAttitudePacket() {
@@ -592,9 +553,7 @@ void sendAttitudePacket() {
     attitude.reserved[i] = 0;
   }
 
-  bool ok = radio.write(&attitude, sizeof(attitude));
-
-  CamSerial.write((uint8_t *)&attitude, sizeof(attitude));
+  size_t bytesSent = CamSerial.write((uint8_t *)&attitude, sizeof(attitude));
 
   Serial.print("ATTITUDE packet ");
   Serial.print(attitude.counter);
@@ -608,6 +567,6 @@ void sendAttitudePacket() {
   Serial.print(attitude.pitch_deg10 / 10.0f);
   Serial.print(" yaw=");
   Serial.print(attitude.yaw_deg10 / 10.0f);
-  Serial.print(" status: ");
-  Serial.println(ok ? "OK" : "FAIL");
+  Serial.print(" bytes sent=");
+  Serial.println(bytesSent);
 }
