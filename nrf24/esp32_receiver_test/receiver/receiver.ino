@@ -1,34 +1,30 @@
 #include <WiFi.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
-#include <SPI.h>
-#include <RF24.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include <esp_idf_version.h>
 
-// =========================
-// WiFi + server
-// =========================
-const char* ssid = "LaboPLC";
-const char* password = "link1982";
+// ============================================================
+// ESP-NOW test receiver for Hermes telemetry
+// Must match the ESP32-CAM transmitter channel.
+// ============================================================
+#define ESPNOW_CHANNEL 1
 
-const char* serverUrl = "https://cansat1.onrender.com/api/telemetry";
+// ============================================================
+// Packet protocol - MUST match onboard ESP32 and ESP32-CAM
+// ============================================================
+enum PacketType : uint8_t {
+  PACKET_CORE = 1,
+  PACKET_ATTITUDE = 2
+};
 
-// =========================
-// nRF24
-// =========================
-#define NRF_CE 25
-#define NRF_CSN 26
+const uint8_t PACKET_VERSION = 1;
 
-RF24 radio(NRF_CE, NRF_CSN);
-
-const byte address[6] = "GAAY1";
-
-// Must match modos_de_vuelo.ino exactly
 struct __attribute__((packed)) TelemetryPacket {
   uint8_t packetType;
   uint8_t version;
 
   uint32_t counter;
-  //uint32_t time_ms;
+  uint32_t time_ms;
 
   float lat;
   float lon;
@@ -41,185 +37,371 @@ struct __attribute__((packed)) TelemetryPacket {
   uint8_t reserved[1];
 };
 
-
 struct __attribute__((packed)) TelemetryAttitudePacket {
-  uint8_t packetType;      // PACKET_ATTITUDE
-  uint8_t version;         // packet format version
+  uint8_t packetType;
+  uint8_t version;
 
-  uint32_t counter;        // packet counter
-  uint32_t time_ms;        // time since mission start
+  uint32_t counter;
+  uint32_t time_ms;
 
-  uint16_t lidar_mm;       // LiDAR distance in millimeters
+  uint16_t lidar_mm;
 
-  int16_t roll_deg10;      // roll angle * 10
-  int16_t pitch_deg10;     // pitch angle * 10
-  int16_t yaw_deg10;       // yaw angle * 10
+  int16_t roll_deg10;
+  int16_t pitch_deg10;
+  int16_t yaw_deg10;
 
-  uint8_t mode;            // mission mode
-  uint8_t lidar_status;    // 0 invalid, 1 valid
-  uint8_t mpu_status;      // 0 invalid, 1 valid
+  uint8_t mode;
+  uint8_t lidar_status;
+  uint8_t mpu_status;
 
-  uint8_t reserved[1];    // keep packet at 32 bytes
+  uint8_t reserved[11];
 };
 
+static_assert(sizeof(TelemetryPacket) == 36,
+              "TelemetryPacket must be exactly 36 bytes");
+static_assert(sizeof(TelemetryAttitudePacket) == 32,
+              "TelemetryAttitudePacket must be exactly 32 bytes");
 
-static_assert(
-  sizeof(TelemetryPacket) == 32,
-  "TelemetryPacket must be exactly 32 bytes"
-);
+// ============================================================
+// RX queue
+// Keep ESP-NOW callback short. Printing is done from loop().
+// ============================================================
+constexpr size_t MAX_PACKET_SIZE = sizeof(TelemetryPacket);
+constexpr uint8_t RX_QUEUE_LENGTH = 20;
 
-TelemetryPacket packet;
+struct ReceivedFrame {
+  uint8_t sourceMac[6];
+  int8_t rssi;
+  uint8_t length;
+  uint8_t data[MAX_PACKET_SIZE];
+};
 
-void connectWiFi();
-void sendToServer(const TelemetryPacket& p);
+QueueHandle_t rxQueue = nullptr;
 
+// ============================================================
+// Link statistics
+// CORE and ATTITUDE have their own loss tracking because they
+// share a counter but are transmitted as separate frames.
+// ============================================================
+uint32_t coreReceived = 0;
+uint32_t attitudeReceived = 0;
+uint32_t invalidReceived = 0;
+uint32_t queueDrops = 0;
+uint32_t coreMissing = 0;
+uint32_t attitudeMissing = 0;
+
+bool haveLastCoreCounter = false;
+bool haveLastAttitudeCounter = false;
+uint32_t lastCoreCounter = 0;
+uint32_t lastAttitudeCounter = 0;
+
+// ============================================================
+// Helpers
+// ============================================================
+void printMac(const uint8_t *mac) {
+  if (mac == nullptr) {
+    Serial.print("--:--:--:--:--:--");
+    return;
+  }
+
+  for (int i = 0; i < 6; i++) {
+    if (i > 0) Serial.print(":");
+    if (mac[i] < 0x10) Serial.print("0");
+    Serial.print(mac[i], HEX);
+  }
+}
+
+void updateLossCounter(uint32_t currentCounter,
+                       bool &haveLast,
+                       uint32_t &lastCounter,
+                       uint32_t &missingCounter) {
+  if (haveLast && currentCounter > lastCounter + 1) {
+    missingCounter += currentCounter - lastCounter - 1;
+  }
+
+  lastCounter = currentCounter;
+  haveLast = true;
+}
+
+const char *missionModeName(uint8_t mode) {
+  switch (mode) {
+    case 0: return "PRELAUNCH";
+    case 1: return "DESCENT";
+    case 2: return "POST_IMPACT";
+    default: return "UNKNOWN";
+  }
+}
+
+void printFrameHeader(const ReceivedFrame &frame, const char *name) {
+  Serial.println();
+  Serial.println("==================================================");
+  Serial.print(name);
+  Serial.print(" | bytes=");
+  Serial.print(frame.length);
+  Serial.print(" | RSSI=");
+  Serial.print(frame.rssi);
+  Serial.print(" dBm | from ");
+  printMac(frame.sourceMac);
+  Serial.println();
+}
+
+void processCorePacket(const ReceivedFrame &frame) {
+  if (frame.length != sizeof(TelemetryPacket)) {
+    Serial.print("CORE rejected: expected ");
+    Serial.print(sizeof(TelemetryPacket));
+    Serial.print(" bytes, got ");
+    Serial.println(frame.length);
+    invalidReceived++;
+    return;
+  }
+
+  TelemetryPacket packet;
+  memcpy(&packet, frame.data, sizeof(packet));
+
+  if (packet.version != PACKET_VERSION) {
+    Serial.print("CORE warning: packet version ");
+    Serial.print(packet.version);
+    Serial.print(" != expected ");
+    Serial.println(PACKET_VERSION);
+  }
+
+  coreReceived++;
+  updateLossCounter(packet.counter,
+                    haveLastCoreCounter,
+                    lastCoreCounter,
+                    coreMissing);
+
+  printFrameHeader(frame, "CORE PACKET");
+
+  Serial.print("Counter:      "); Serial.println(packet.counter);
+  Serial.print("Time ms:      "); Serial.println(packet.time_ms);
+  Serial.print("Latitude:     "); Serial.println(packet.lat, 6);
+  Serial.print("Longitude:    "); Serial.println(packet.lon, 6);
+  Serial.print("Altitude:     "); Serial.print(packet.alt, 2); Serial.println(" m");
+  Serial.print("Satellites:   "); Serial.println(packet.sat);
+  Serial.print("Temperature:  "); Serial.print(packet.temp, 2); Serial.println(" C");
+  Serial.print("Pressure:     "); Serial.print(packet.pressure, 2); Serial.println(" hPa");
+  Serial.print("Humidity:     "); Serial.print(packet.humidity, 2); Serial.println(" %");
+  Serial.print("GPS status:   "); Serial.println(packet.reserved[0]);
+
+  Serial.print("CORE received: "); Serial.print(coreReceived);
+  Serial.print(" | missing: "); Serial.println(coreMissing);
+}
+
+void processAttitudePacket(const ReceivedFrame &frame) {
+  if (frame.length != sizeof(TelemetryAttitudePacket)) {
+    Serial.print("ATTITUDE rejected: expected ");
+    Serial.print(sizeof(TelemetryAttitudePacket));
+    Serial.print(" bytes, got ");
+    Serial.println(frame.length);
+    invalidReceived++;
+    return;
+  }
+
+  TelemetryAttitudePacket packet;
+  memcpy(&packet, frame.data, sizeof(packet));
+
+  if (packet.version != PACKET_VERSION) {
+    Serial.print("ATTITUDE warning: packet version ");
+    Serial.print(packet.version);
+    Serial.print(" != expected ");
+    Serial.println(PACKET_VERSION);
+  }
+
+  attitudeReceived++;
+  updateLossCounter(packet.counter,
+                    haveLastAttitudeCounter,
+                    lastAttitudeCounter,
+                    attitudeMissing);
+
+  printFrameHeader(frame, "ATTITUDE PACKET");
+
+  Serial.print("Counter:      "); Serial.println(packet.counter);
+  Serial.print("Time ms:      "); Serial.println(packet.time_ms);
+  Serial.print("LiDAR:        "); Serial.print(packet.lidar_mm); Serial.println(" mm");
+  Serial.print("Roll:         "); Serial.print(packet.roll_deg10 / 10.0f, 1); Serial.println(" deg");
+  Serial.print("Pitch:        "); Serial.print(packet.pitch_deg10 / 10.0f, 1); Serial.println(" deg");
+  Serial.print("Yaw:          "); Serial.print(packet.yaw_deg10 / 10.0f, 1); Serial.println(" deg");
+  Serial.print("Mission mode: "); Serial.print(packet.mode);
+  Serial.print(" ("); Serial.print(missionModeName(packet.mode)); Serial.println(")");
+  Serial.print("LiDAR status: "); Serial.println(packet.lidar_status);
+  Serial.print("MPU status:   "); Serial.println(packet.mpu_status);
+
+  Serial.print("ATT received:  "); Serial.print(attitudeReceived);
+  Serial.print(" | missing: "); Serial.println(attitudeMissing);
+}
+
+void processReceivedFrame(const ReceivedFrame &frame) {
+  if (frame.length < 2) {
+    Serial.println("Invalid ESP-NOW frame: too short");
+    invalidReceived++;
+    return;
+  }
+
+  uint8_t packetType = frame.data[0];
+
+  switch (packetType) {
+    case PACKET_CORE:
+      processCorePacket(frame);
+      break;
+
+    case PACKET_ATTITUDE:
+      processAttitudePacket(frame);
+      break;
+
+    default:
+      Serial.println();
+      Serial.print("Unknown packet type: ");
+      Serial.print(packetType);
+      Serial.print(" | bytes: ");
+      Serial.println(frame.length);
+      invalidReceived++;
+      break;
+  }
+}
+
+// ============================================================
+// ESP-NOW receive callback
+// ESP-IDF 5.1+ changed the callback signature.
+// ============================================================
+#if ESP_IDF_VERSION_MAJOR > 5 || \
+    (ESP_IDF_VERSION_MAJOR == 5 && ESP_IDF_VERSION_MINOR >= 1)
+
+void onDataReceived(const esp_now_recv_info_t *info,
+                    const uint8_t *data,
+                    int len) {
+  if (data == nullptr || len <= 0 || len > (int)MAX_PACKET_SIZE) {
+    invalidReceived++;
+    return;
+  }
+
+  ReceivedFrame frame = {};
+  frame.length = (uint8_t)len;
+  memcpy(frame.data, data, len);
+
+  if (info != nullptr) {
+    if (info->src_addr != nullptr) {
+      memcpy(frame.sourceMac, info->src_addr, 6);
+    }
+
+    if (info->rx_ctrl != nullptr) {
+      frame.rssi = info->rx_ctrl->rssi;
+    }
+  }
+
+  if (xQueueSend(rxQueue, &frame, 0) != pdTRUE) {
+    queueDrops++;
+  }
+}
+
+#else
+
+void onDataReceived(const uint8_t *mac,
+                    const uint8_t *data,
+                    int len) {
+  if (data == nullptr || len <= 0 || len > (int)MAX_PACKET_SIZE) {
+    invalidReceived++;
+    return;
+  }
+
+  ReceivedFrame frame = {};
+  frame.length = (uint8_t)len;
+  frame.rssi = 0;  // RSSI is not directly available in the old callback.
+  memcpy(frame.data, data, len);
+
+  if (mac != nullptr) {
+    memcpy(frame.sourceMac, mac, 6);
+  }
+
+  if (xQueueSend(rxQueue, &frame, 0) != pdTRUE) {
+    queueDrops++;
+  }
+}
+
+#endif
+
+// ============================================================
+// Setup
+// ============================================================
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  connectWiFi();
+  Serial.println();
+  Serial.println("Hermes ESP-NOW telemetry receiver");
+  Serial.println("---------------------------------");
 
-  // SCK = 18, MISO = 19, MOSI = 23, CSN = 26
-  SPI.begin(18, 19, 23, NRF_CSN);
-
-  if (!radio.begin()) {
-    Serial.println("nRF24 not detected");
-    while (true) {
-      delay(1000);
-    }
+  rxQueue = xQueueCreate(RX_QUEUE_LENGTH, sizeof(ReceivedFrame));
+  if (rxQueue == nullptr) {
+    Serial.println("ERROR: could not create RX queue");
+    while (true) delay(1000);
   }
 
-  radio.openReadingPipe(0, address);
-  radio.setChannel(108);
-  radio.setDataRate(RF24_250KBPS);
-  radio.setPALevel(RF24_PA_LOW);
-  radio.setAutoAck(true);
-  radio.startListening();
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
 
-  Serial.print("Expected packet size: ");
-  Serial.println(sizeof(TelemetryPacket));
+  esp_err_t channelResult =
+      esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-  Serial.println("Ground station ready: nRF24 RX + HTTP POST");
-}
-
-void loop() {
-  if (radio.available()) {
-    radio.read(&packet, sizeof(packet));
-
-    Serial.println();
-    Serial.println("===== PACKET RECEIVED =====");
-
-    Serial.print("Counter: ");
-    Serial.println(packet.counter);
-
-    Serial.print("Latitude: ");
-    Serial.println(packet.lat, 6);
-
-    Serial.print("Longitude: ");
-    Serial.println(packet.lon, 6);
-
-    Serial.print("Altitude: ");
-    Serial.println(packet.alt, 2);
-
-    Serial.print("Satellites: ");
-    Serial.println(packet.sat);
-
-    Serial.print("Temperature: ");
-    Serial.println(packet.temp, 2);
-
-    Serial.print("Pressure: ");
-    Serial.println(packet.pressure, 2);
-
-    Serial.print("Humidity: ");
-    Serial.println(packet.humidity, 2);
-
-    Serial.print("counter: ");
-    Serial.println(packet.counter, 2);
-
-    Serial.print("time: ");
-    Serial.println(packet.time_ms, 2);
-    
-    Serial.print("roll: ");
-    Serial.println(packet.eoll_deg10, 2);
-
-    Serial.print("pitch: ");
-    Serial.println(packet.pitch_deg10, 2);
-
-    Serial.print("yaw_deg10: ");
-    Serial.println(packet.yaw_deg10, 2);
-    
-    Serial.print("mission mode: ");
-    Serial.println(packet.mode, 2);
-
-    Serial.print("lidar mm: ");
-    Serial.println(packet.lidar_mm, 2);
-
-  ;        
-    sendToServer(packet);
+  if (channelResult != ESP_OK) {
+    Serial.print("ERROR setting WiFi channel: ");
+    Serial.println(channelResult);
+    while (true) delay(1000);
   }
-}
 
-void connectWiFi() {
-  Serial.print("Connecting to WiFi");
-
-  WiFi.begin(ssid, password);
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ERROR initializing ESP-NOW");
+    while (true) delay(1000);
   }
+
+  if (esp_now_register_recv_cb(onDataReceived) != ESP_OK) {
+    Serial.println("ERROR registering ESP-NOW receive callback");
+    while (true) delay(1000);
+  }
+
+  Serial.print("Receiver MAC: ");
+  Serial.println(WiFi.macAddress());
+
+  Serial.print("ESP-NOW channel: ");
+  Serial.println(ESPNOW_CHANNEL);
+
+  Serial.print("CORE packet size: ");
+  Serial.print(sizeof(TelemetryPacket));
+  Serial.println(" bytes");
+
+  Serial.print("ATTITUDE packet size: ");
+  Serial.print(sizeof(TelemetryAttitudePacket));
+  Serial.println(" bytes");
 
   Serial.println();
-  Serial.println("WiFi connected");
-
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+  Serial.println("Waiting for telemetry from ESP32-CAM...");
 }
 
-void sendToServer(const TelemetryPacket& p) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected. Reconnecting...");
+// ============================================================
+// Main loop
+// ============================================================
+void loop() {
+  ReceivedFrame frame;
 
-    connectWiFi();
-
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("Could not reconnect to WiFi");
-      return;
-    }
+  while (xQueueReceive(rxQueue, &frame, 0) == pdTRUE) {
+    processReceivedFrame(frame);
   }
 
-  String json = "{";
-  json += "\"lat\":" + String(p.lat, 6) + ",";
-  json += "\"lon\":" + String(p.lon, 6) + ",";
-  json += "\"alt\":" + String(p.alt, 2) + ",";
-  json += "\"sat\":" + String(p.sat) + ",";
-  json += "\"temp\":" + String(p.temp, 2) + ",";
-  json += "\"pressure\":" + String(p.pressure, 2) + ",";
-  json += "\"humidity\":" + String(p.humidity, 2);
-  json += "}";
+  static unsigned long lastStatsMs = 0;
+  if (millis() - lastStatsMs >= 5000) {
+    lastStatsMs = millis();
 
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient http;
-
-  http.begin(client, serverUrl);
-  http.addHeader("Content-Type", "application/json");
-
-  Serial.println("Sending JSON:");
-  Serial.println(json);
-
-  int httpCode = http.POST(json);
-
-  Serial.print("HTTP response: ");
-  Serial.println(httpCode);
-
-  if (httpCode > 0) {
-    Serial.println(http.getString());
-  } else {
-    Serial.print("HTTP error: ");
-    Serial.println(http.errorToString(httpCode));
+    Serial.println();
+    Serial.println("---------------- LINK STATS ----------------");
+    Serial.print("CORE received:     "); Serial.println(coreReceived);
+    Serial.print("CORE missing:      "); Serial.println(coreMissing);
+    Serial.print("ATT received:      "); Serial.println(attitudeReceived);
+    Serial.print("ATT missing:       "); Serial.println(attitudeMissing);
+    Serial.print("Invalid frames:    "); Serial.println(invalidReceived);
+    Serial.print("RX queue drops:    "); Serial.println(queueDrops);
+    Serial.println("--------------------------------------------");
   }
 
-  http.end();
+  delay(1);
 }

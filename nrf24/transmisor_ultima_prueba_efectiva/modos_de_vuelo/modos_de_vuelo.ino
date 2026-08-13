@@ -1,5 +1,4 @@
 
-#
 #include <Wire.h>
 #include <math.h>
 
@@ -9,6 +8,14 @@
 #include <TinyGPS++.h>
 #include <Adafruit_VL53L0X.h>
 HardwareSerial CamSerial(1);
+
+// =========================
+// UART framing ESP32 -> ESP32-CAM
+// Frame: 0xAA 0x55 | payload_length | payload | XOR checksum
+// The payload itself remains exactly the same telemetry struct.
+// =========================
+const uint8_t UART_SYNC_1 = 0xAA;
+const uint8_t UART_SYNC_2 = 0x55;
 
 struct __attribute__((packed)) TelemetryPacket {
   uint8_t packetType;
@@ -27,6 +34,8 @@ struct __attribute__((packed)) TelemetryPacket {
   uint8_t sat;
   uint8_t reserved[1];
 };
+
+static_assert(sizeof(TelemetryPacket) == 36, "TelemetryPacket must be 36 bytes");
 
 struct __attribute__((packed)) TelemetryAttitudePacket {
   uint8_t packetType;      // PACKET_ATTITUDE
@@ -101,7 +110,20 @@ float yawDeg = 0.0f;
 bool mpuValid = false;
 bool mpuAngleInitialized = false;
 
-unsigned long lastMpuAngleMs = 0;
+// Gyroscope zero-rate offsets, measured during startup calibration.
+// Adafruit_MPU6050 reports gyro values in rad/s.
+float gyroOffsetX = 0.0f;
+float gyroOffsetY = 0.0f;
+float gyroOffsetZ = 0.0f;
+
+// MPU sampling is independent from telemetry transmission.
+// 20 ms = 50 Hz.
+const uint32_t MPU_INTERVAL_US = 20000;
+uint32_t lastMpuSampleUs = 0;
+
+// Complementary-filter time constant. Alpha is calculated from dt,
+// instead of using a fixed 0.98 coefficient at every sample rate.
+const float MPU_FILTER_TAU_S = 0.50f;
 
 float accelTotal = NAN;
 bool mpuOk = false;
@@ -139,8 +161,12 @@ void handlePrelaunch();
 void handleDescent();
 void handlePostImpact();
 void updateMPU6050();
+bool calibrateMPU6050(uint16_t samples = 500);
+void printMPUReport();
+void printMPUAngleReport();
 void updateLidar();
 void sendTelemetryCycle();
+size_t sendFramedUartPacket(const uint8_t *data, uint8_t length);
 // =========================
 // Mission modes
 // =========================
@@ -172,7 +198,7 @@ void setup() {
   missionStartMs = millis();
   modeStartMs = missionStartMs;
   currentMode = MODE_PRELAUNCH;
-
+  CamSerial.setRxBufferSize(2048);
   CamSerial.begin(115200, SERIAL_8N1, CAM_UART_RX, CAM_UART_TX);
   Serial.print("ESP32-CAM UART logger ready");
   // I2C: default ESP32 pins SDA=21, SCL=22
@@ -219,6 +245,13 @@ void setup() {
     mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
     mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+    // IMPORTANT: keep the CanSat completely still during this calibration.
+    delay(250);
+    calibrateMPU6050();
+
+    // Take one initial sample so roll/pitch start from gravity immediately.
+    updateMPU6050();
   }
 
   packet.packetType = PACKET_CORE;
@@ -233,19 +266,31 @@ void setup() {
 void loop() {
   updateGPS();
 
-  unsigned long now = millis();
-if (now - lastSendMs >= sendIntervalMs) {
-  lastSendMs = now;
+  while (CamSerial.available()) {
+    Serial.write(CamSerial.read());
+  }
 
-  if (currentMode == MODE_PRELAUNCH) {
-  handlePrelaunch();
-} else if (currentMode == MODE_DESCENT) {
-  handleDescent();
-} else if (currentMode == MODE_POST_IMPACT) {
-  handlePostImpact();
-}
+  // Update the MPU continuously at 50 Hz, independently of telemetry.
+  // This prevents the complementary filter from integrating the gyro
+  // over the 750 ms telemetry interval.
+  uint32_t nowUs = micros();
+  if ((uint32_t)(nowUs - lastMpuSampleUs) >= MPU_INTERVAL_US) {
+    updateMPU6050();
+  }
+
+  unsigned long now = millis();
+  if (now - lastSendMs >= sendIntervalMs) {
+    lastSendMs = now;
+
+    if (currentMode == MODE_PRELAUNCH) {
+      handlePrelaunch();
+    } else if (currentMode == MODE_DESCENT) {
+      handleDescent();
+    } else if (currentMode == MODE_POST_IMPACT) {
+      handlePostImpact();
     }
   }
+}
 
 
 
@@ -253,8 +298,8 @@ void handlePrelaunch() {
   Serial.println("\n===== PRELAUNCH MODE =====");
 
   updateEnvironmentalSensors();
-  updateMPU6050();
-  updateMPUAngles();
+  printMPUReport();
+  printMPUAngleReport();
   updateLidar();
 
   
@@ -282,7 +327,8 @@ void handleDescent() {
   Serial.println("\n===== DESCENT MODE =====");
 
   updateEnvironmentalSensors();
-  updateMPU6050();
+  printMPUReport();
+  printMPUAngleReport();
 
   sendTelemetryCycle();
 }
@@ -295,6 +341,34 @@ void updateGPS() {
   while (Serial2.available() > 0) {
     gps.encode(Serial2.read());
   }
+}
+
+void updateEnvironmentalSensors() {
+  if (bme.performReading()) {
+    lastBmeTemp  = bme.temperature;
+    lastPressure = bme.pressure / 100.0f;        // Pa -> hPa
+    lastHumidity = bme.humidity;
+    lastGas      = bme.gas_resistance / 1000.0f; // ohms -> KOhms
+  } else {
+    Serial.println("BME680 reading failed");
+  }
+
+  Serial.println("\n===== PAYLOAD SENSOR REPORT =====");
+
+  Serial.print("GPS valid: ");
+  Serial.println(gps.location.isValid() ? "yes" : "no");
+
+  Serial.print("BME680 Temp: ");
+  Serial.println(lastBmeTemp);
+
+  Serial.print("Pressure hPa: ");
+  Serial.println(lastPressure);
+
+  Serial.print("Humidity %: ");
+  Serial.println(lastHumidity);
+
+  Serial.print("Gas KOhms: ");
+  Serial.println(lastGas);
 }
 
 void updateLidar() {
@@ -329,76 +403,63 @@ void updateLidar() {
 }
 
 
-void updateMPU6050() {
-  if (!mpuOk) {
-    Serial.println("MPU6050 not available");
-    return;
+bool calibrateMPU6050(uint16_t samples) {
+  if (!mpuOk || samples == 0) {
+    return false;
   }
+
+  Serial.println("\n===== MPU6050 GYRO CALIBRATION =====");
+  Serial.println("Keep the CanSat completely still...");
+
+  double sumX = 0.0;
+  double sumY = 0.0;
+  double sumZ = 0.0;
 
   sensors_event_t accelEvent;
   sensors_event_t gyroEvent;
   sensors_event_t tempEvent;
 
-  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  for (uint16_t i = 0; i < samples; i++) {
+    mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
 
-  ax = accelEvent.acceleration.x;
-  ay = accelEvent.acceleration.y;
-  az = accelEvent.acceleration.z;
+    sumX += gyroEvent.gyro.x;
+    sumY += gyroEvent.gyro.y;
+    sumZ += gyroEvent.gyro.z;
 
-  gx = gyroEvent.gyro.x;
-  gy = gyroEvent.gyro.y;
-  gz = gyroEvent.gyro.z;
-
-  accelTotal = sqrt((ax * ax) + (ay * ay) + (az * az));
-
-  Serial.println("\n===== MPU6050 REPORT =====");
-
-  Serial.print("Accel m/s^2: ");
-  Serial.print(ax);
-  Serial.print(", ");
-  Serial.print(ay);
-  Serial.print(", ");
-  Serial.println(az);
-
-  Serial.print("Gyro rad/s: ");
-  Serial.print(gx);
-  Serial.print(", ");
-  Serial.print(gy);
-  Serial.print(", ");
-  Serial.println(gz);
-
-  Serial.print("Accel total m/s^2: ");
-  Serial.println(accelTotal);
-}
-
-void updateEnvironmentalSensors() {
-  if (bme.performReading()) {
-    lastBmeTemp  = bme.temperature;
-    lastPressure = bme.pressure / 100.0f;       // Pa -> hPa
-    lastHumidity = bme.humidity;
-    lastGas      = bme.gas_resistance / 1000.0f; // ohms -> KOhms
-  } else {
-    Serial.println("BME680 reading failed");
+    delay(5);
   }
 
-  Serial.println("\n===== PAYLOAD SENSOR REPORT =====");
+  gyroOffsetX = (float)(sumX / samples);
+  gyroOffsetY = (float)(sumY / samples);
+  gyroOffsetZ = (float)(sumZ / samples);
 
-  Serial.print("GPS valid: ");
-  Serial.println(gps.location.isValid() ? "yes" : "no");
+  mpuAngleInitialized = false;
+  lastMpuSampleUs = micros();
 
-  Serial.print("BME680 Temp: ");
-  Serial.println(lastBmeTemp);
+  Serial.print("Gyro offset X rad/s: ");
+  Serial.println(gyroOffsetX, 6);
+  Serial.print("Gyro offset Y rad/s: ");
+  Serial.println(gyroOffsetY, 6);
+  Serial.print("Gyro offset Z rad/s: ");
+  Serial.println(gyroOffsetZ, 6);
+  Serial.println("MPU6050 gyro calibration complete");
 
-  Serial.print("Pressure hPa: ");
-  Serial.println(lastPressure);
-
-  Serial.print("Humidity %: ");
-  Serial.println(lastHumidity);
-
-  Serial.print("Gas KOhms: ");
-  Serial.println(lastGas);
+  return true;
 }
-void updateMPUAngles() {
+
+float wrapAngle180(float angleDeg) {
+  while (angleDeg > 180.0f) angleDeg -= 360.0f;
+  while (angleDeg < -180.0f) angleDeg += 360.0f;
+  return angleDeg;
+}
+
+float complementaryAngle(float gyroPredictionDeg, float accelAngleDeg, float alpha) {
+  // Blend through the shortest angular distance, avoiding a jump at +/-180 deg.
+  float errorDeg = wrapAngle180(accelAngleDeg - gyroPredictionDeg);
+  return wrapAngle180(gyroPredictionDeg + (1.0f - alpha) * errorDeg);
+}
+
+void updateMPU6050() {
   if (!mpuOk) {
     mpuValid = false;
     return;
@@ -410,42 +471,98 @@ void updateMPUAngles() {
 
   mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
 
-  unsigned long now = millis();
-
+  uint32_t nowUs = micros();
   float dt = 0.0f;
-  if (lastMpuAngleMs != 0) {
-    dt = (now - lastMpuAngleMs) / 1000.0f;
+
+  if (lastMpuSampleUs != 0) {
+    dt = (uint32_t)(nowUs - lastMpuSampleUs) / 1000000.0f;
   }
 
-  lastMpuAngleMs = now;
+  lastMpuSampleUs = nowUs;
 
-  float ax = accelEvent.acceleration.x;
-  float ay = accelEvent.acceleration.y;
-  float az = accelEvent.acceleration.z;
+  // Acceleration in m/s^2.
+  ax = accelEvent.acceleration.x;
+  ay = accelEvent.acceleration.y;
+  az = accelEvent.acceleration.z;
 
-  float gyroXDegS = gyroEvent.gyro.x * 57.2957795f;
-  float gyroYDegS = gyroEvent.gyro.y * 57.2957795f;
-  float gyroZDegS = gyroEvent.gyro.z * 57.2957795f;
+  // Remove the zero-rate bias measured at startup.
+  // gx/gy/gz remain in rad/s so the diagnostic output is meaningful.
+  gx = gyroEvent.gyro.x - gyroOffsetX;
+  gy = gyroEvent.gyro.y - gyroOffsetY;
+  gz = gyroEvent.gyro.z - gyroOffsetZ;
 
+  accelTotal = sqrtf((ax * ax) + (ay * ay) + (az * az));
+
+  // Gravity-derived absolute roll and pitch references.
   float accRollDeg = atan2f(ay, az) * 180.0f / PI;
   float accPitchDeg = atan2f(-ax, sqrtf((ay * ay) + (az * az))) * 180.0f / PI;
 
-  if (!mpuAngleInitialized || dt <= 0.0f || dt > 1.0f) {
+  // Adafruit_MPU6050 gyro output is rad/s; convert only for integration.
+  const float RAD_TO_DEG_F = 57.2957795f;
+  float gyroXDegS = gx * RAD_TO_DEG_F;
+  float gyroYDegS = gy * RAD_TO_DEG_F;
+  float gyroZDegS = gz * RAD_TO_DEG_F;
+
+  // Initialize roll/pitch directly from gravity. If there was an abnormal
+  // scheduling gap, re-anchor roll/pitch rather than integrating a huge dt.
+  if (!mpuAngleInitialized) {
     rollDeg = accRollDeg;
     pitchDeg = accPitchDeg;
     yawDeg = 0.0f;
     mpuAngleInitialized = true;
-  } else {
-    rollDeg = 0.98f * (rollDeg + gyroXDegS * dt) + 0.02f * accRollDeg;
-    pitchDeg = 0.98f * (pitchDeg + gyroYDegS * dt) + 0.02f * accPitchDeg;
-    yawDeg += gyroZDegS * dt;
+  }
+  else if (dt > 0.0f && dt <= 0.20f) {
+    float alpha = MPU_FILTER_TAU_S / (MPU_FILTER_TAU_S + dt);
+
+    float rollPrediction = wrapAngle180(rollDeg + gyroXDegS * dt);
+    float pitchPrediction = wrapAngle180(pitchDeg + gyroYDegS * dt);
+
+    rollDeg = complementaryAngle(rollPrediction, accRollDeg, alpha);
+    pitchDeg = complementaryAngle(pitchPrediction, accPitchDeg, alpha);
+
+    // MPU6050 has no magnetometer. Yaw is therefore relative and will
+    // slowly drift even after gyro calibration.
+    yawDeg = wrapAngle180(yawDeg + gyroZDegS * dt);
+  }
+  else if (dt > 0.20f) {
+    // Large pause: trust gravity again for roll/pitch and do not integrate
+    // gyro through the missing interval.
+    rollDeg = accRollDeg;
+    pitchDeg = accPitchDeg;
   }
 
-  while (yawDeg > 180.0f) yawDeg -= 360.0f;
-  while (yawDeg < -180.0f) yawDeg += 360.0f;
+  mpuValid = isfinite(ax) && isfinite(ay) && isfinite(az) &&
+             isfinite(gx) && isfinite(gy) && isfinite(gz) &&
+             isfinite(rollDeg) && isfinite(pitchDeg) && isfinite(yawDeg);
+}
 
-  mpuValid = isfinite(rollDeg) && isfinite(pitchDeg) && isfinite(yawDeg);
+void printMPUReport() {
+  Serial.println("\n===== MPU6050 REPORT =====");
 
+  if (!mpuOk) {
+    Serial.println("MPU6050 not available");
+    return;
+  }
+
+  Serial.print("Accel m/s^2: ");
+  Serial.print(ax);
+  Serial.print(", ");
+  Serial.print(ay);
+  Serial.print(", ");
+  Serial.println(az);
+
+  Serial.print("Gyro corrected rad/s: ");
+  Serial.print(gx, 4);
+  Serial.print(", ");
+  Serial.print(gy, 4);
+  Serial.print(", ");
+  Serial.println(gz, 4);
+
+  Serial.print("Accel total m/s^2: ");
+  Serial.println(accelTotal);
+}
+
+void printMPUAngleReport() {
   Serial.println("\n===== MPU ANGLE REPORT =====");
 
   Serial.print("Roll deg: ");
@@ -454,7 +571,7 @@ void updateMPUAngles() {
   Serial.print("Pitch deg: ");
   Serial.println(pitchDeg);
 
-  Serial.print("Yaw deg: ");
+  Serial.print("Yaw deg (relative): ");
   Serial.println(yawDeg);
 
   Serial.print("MPU valid: ");
@@ -472,6 +589,24 @@ int16_t angleToDeg10(float angleDeg) {
   if (scaled < -32767.0f) scaled = -32767.0f;
 
   return (int16_t)lroundf(scaled);
+}
+
+
+size_t sendFramedUartPacket(const uint8_t *data, uint8_t length) {
+  // XOR checksum covers length + complete payload.
+  uint8_t checksum = length;
+  for (uint8_t i = 0; i < length; i++) {
+    checksum ^= data[i];
+  }
+
+  size_t totalSent = 0;
+  totalSent += CamSerial.write(UART_SYNC_1);
+  totalSent += CamSerial.write(UART_SYNC_2);
+  totalSent += CamSerial.write(length);
+  totalSent += CamSerial.write(data, length);
+  totalSent += CamSerial.write(checksum);
+
+  return totalSent;
 }
 
 
@@ -520,13 +655,13 @@ else {
   packet.version = PACKET_VERSION;
   packet.time_ms = millis() - missionStartMs;
 
-  size_t bytesSent = CamSerial.write((uint8_t *)&packet, sizeof(packet));
+  size_t bytesSent = sendFramedUartPacket((const uint8_t *)&packet, sizeof(packet));
 
-  Serial.print("UART CORE packet ");
+  Serial.print("UART CORE frame ");
   Serial.print(packet.counter);
-  Serial.print(" size=");
+  Serial.print(" payload=");
   Serial.print(sizeof(packet));
-  Serial.print(" bytes sent=");
+  Serial.print(" bytes, frame sent=");
   Serial.println(bytesSent);
 }
 
@@ -553,9 +688,9 @@ void sendAttitudePacket() {
     attitude.reserved[i] = 0;
   }
 
-  size_t bytesSent = CamSerial.write((uint8_t *)&attitude, sizeof(attitude));
+  size_t bytesSent = sendFramedUartPacket((const uint8_t *)&attitude, sizeof(attitude));
 
-  Serial.print("ATTITUDE packet ");
+  Serial.print("ATTITUDE frame ");
   Serial.print(attitude.counter);
   Serial.print(" time_ms=");
   Serial.print(attitude.time_ms);

@@ -26,6 +26,31 @@ const char *attitudeLogPath = "/logs/attitude.csv";
 #define PACKET_ATTITUDE    2
 #define PACKET_VERSION     1
 
+// =========================
+// UART framing ESP32 -> ESP32-CAM
+// Frame: 0xAA 0x55 | payload_length | payload | XOR checksum
+// =========================
+const uint8_t UART_SYNC_1 = 0xAA;
+const uint8_t UART_SYNC_2 = 0x55;
+const size_t UART_MAX_PAYLOAD = 64;
+
+enum UartRxState : uint8_t {
+  UART_WAIT_SYNC_1,
+  UART_WAIT_SYNC_2,
+  UART_WAIT_LENGTH,
+  UART_READ_PAYLOAD,
+  UART_WAIT_CHECKSUM
+};
+
+UartRxState uartRxState = UART_WAIT_SYNC_1;
+uint8_t uartRxBuffer[UART_MAX_PAYLOAD];
+uint8_t uartRxLength = 0;
+uint8_t uartRxIndex = 0;
+uint8_t uartRxChecksum = 0;
+uint32_t uartFramesOk = 0;
+uint32_t uartChecksumErrors = 0;
+uint32_t uartRejectedFrames = 0;
+
 // ESP-NOW
 #define ESPNOW_CHANNEL 1
 
@@ -219,6 +244,8 @@ bool appendAttitudeRow(const TelemetryAttitudePacket &p) {
 }
 
 void setup() {
+  // Larger RX buffer helps absorb telemetry while camera/SD operations are busy.
+  Serial.setRxBufferSize(2048);
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.setTimeout(50);
@@ -349,95 +376,299 @@ void setup() {
   }
 }
 
-void handleTelemetry() {
-  int packetsHandled = 0;
-  const int maxPacketsPerLoop = 5;
+void processTelemetryPayload(const uint8_t *buffer, uint8_t packetSize) {
+  if (packetSize == 0) {
+    uartRejectedFrames++;
+    return;
+  }
 
-  while (Serial.available() > 0 && packetsHandled < maxPacketsPerLoop) {
-    uint8_t packetType = (uint8_t)Serial.peek();
-    size_t packetSize = 0;
+  uint8_t packetType = buffer[0];
 
-    if (packetType == PACKET_ENVIRONMENT) {
-      packetSize = sizeof(TelemetryPacket);
-    }
-    else if (packetType == PACKET_ATTITUDE) {
-      packetSize = sizeof(TelemetryAttitudePacket);
-    }
-    else {
-      Serial.read();
-      Serial.print("Unknown UART packet type: ");
-      Serial.println(packetType);
-      continue;
+  if (packetType == PACKET_ENVIRONMENT) {
+    if (packetSize != sizeof(TelemetryPacket)) {
+      Serial.print("UART CORE rejected: wrong size ");
+      Serial.println(packetSize);
+      uartRejectedFrames++;
+      return;
     }
 
-    if ((size_t)Serial.available() < packetSize) {
-      break;
+    TelemetryPacket telemetryPacket;
+    memcpy(&telemetryPacket, buffer, sizeof(telemetryPacket));
+
+    if (telemetryPacket.version != PACKET_VERSION) {
+      Serial.print("UART CORE rejected: version ");
+      Serial.println(telemetryPacket.version);
+      uartRejectedFrames++;
+      return;
     }
 
-    uint8_t buffer[sizeof(TelemetryPacket)];
+    bool saved = appendTelemetryRow(telemetryPacket);
 
-    size_t bytesRead = Serial.readBytes(
-      (char *)buffer,
-      packetSize
-    );
-
-    if (bytesRead != packetSize) {
-      Serial.println("Incomplete UART telemetry packet");
-      break;
+    Serial.print("UART CORE OK counter=");
+    Serial.print(telemetryPacket.counter);
+    Serial.print(" saved=");
+    Serial.println(saved ? "YES" : "NO");
+  }
+  else if (packetType == PACKET_ATTITUDE) {
+    if (packetSize != sizeof(TelemetryAttitudePacket)) {
+      Serial.print("UART ATTITUDE rejected: wrong size ");
+      Serial.println(packetSize);
+      uartRejectedFrames++;
+      return;
     }
 
-    if (packetType == PACKET_ATTITUDE) {
-      TelemetryAttitudePacket attitudePacket;
-      memcpy(&attitudePacket, buffer, sizeof(attitudePacket));
-      appendAttitudeRow(attitudePacket);
-    }
-    else if (packetType == PACKET_ENVIRONMENT) {
-      TelemetryPacket telemetryPacket;
-      memcpy(&telemetryPacket, buffer, sizeof(telemetryPacket));
-      appendTelemetryRow(telemetryPacket);
+    TelemetryAttitudePacket attitudePacket;
+    memcpy(&attitudePacket, buffer, sizeof(attitudePacket));
+
+    if (attitudePacket.version != PACKET_VERSION) {
+      Serial.print("UART ATTITUDE rejected: version ");
+      Serial.println(attitudePacket.version);
+      uartRejectedFrames++;
+      return;
     }
 
-    // Forward exactly the same telemetry packet received by UART.
-    sendPacketEspNow(buffer, packetSize);
+    // Reject impossible status values instead of writing corrupted rows to SD.
+    if (attitudePacket.mode > 2 ||
+        attitudePacket.lidar_status > 1 ||
+        attitudePacket.mpu_status > 1) {
+      Serial.print("UART ATTITUDE rejected: invalid status fields mode=");
+      Serial.print(attitudePacket.mode);
+      Serial.print(" lidar_status=");
+      Serial.print(attitudePacket.lidar_status);
+      Serial.print(" mpu_status=");
+      Serial.println(attitudePacket.mpu_status);
+      uartRejectedFrames++;
+      return;
+    }
 
-    packetsHandled++;
+    bool saved = appendAttitudeRow(attitudePacket);
+
+    Serial.print("UART ATTITUDE OK counter=");
+    Serial.print(attitudePacket.counter);
+    Serial.print(" roll=");
+    Serial.print(attitudePacket.roll_deg10 / 10.0f, 1);
+    Serial.print(" pitch=");
+    Serial.print(attitudePacket.pitch_deg10 / 10.0f, 1);
+    Serial.print(" yaw=");
+    Serial.print(attitudePacket.yaw_deg10 / 10.0f, 1);
+    Serial.print(" saved=");
+    Serial.println(saved ? "YES" : "NO");
+  }
+  else {
+    Serial.print("UART frame rejected: unknown packet type ");
+    Serial.println(packetType);
+    uartRejectedFrames++;
+    return;
+  }
+
+  // Forward exactly the validated telemetry payload received by UART.
+  if (!sendPacketEspNow(buffer, packetSize)) {
+    Serial.println("ESP-NOW forwarding failed");
   }
 }
 
-void loop() {
-  handleTelemetry();
+void resetUartParser() {
+  uartRxState = UART_WAIT_SYNC_1;
+  uartRxLength = 0;
+  uartRxIndex = 0;
+  uartRxChecksum = 0;
+}
 
-  unsigned long now = millis();
-  if (lastPhotoMs != 0 && now - lastPhotoMs < photoIntervalMs) {
-    delay(1);
-    return;
+void handleTelemetry() {
+  // Non-blocking byte-by-byte state machine. It can recover automatically
+  // if the ESP32-CAM starts listening in the middle of a UART packet.
+  while (Serial.available() > 0) {
+    uint8_t b = (uint8_t)Serial.read();
+
+    switch (uartRxState) {
+      case UART_WAIT_SYNC_1:
+        if (b == UART_SYNC_1) {
+          uartRxState = UART_WAIT_SYNC_2;
+        }
+        break;
+
+      case UART_WAIT_SYNC_2:
+        if (b == UART_SYNC_2) {
+          uartRxState = UART_WAIT_LENGTH;
+        } else if (b == UART_SYNC_1) {
+          // Could already be the first byte of the next sync sequence.
+          uartRxState = UART_WAIT_SYNC_2;
+        } else {
+          uartRxState = UART_WAIT_SYNC_1;
+        }
+        break;
+
+      case UART_WAIT_LENGTH:
+        uartRxLength = b;
+        uartRxIndex = 0;
+        uartRxChecksum = b;
+
+        if (uartRxLength == 0 || uartRxLength > UART_MAX_PAYLOAD) {
+          Serial.print("UART invalid frame length: ");
+          Serial.println(uartRxLength);
+          uartRejectedFrames++;
+          resetUartParser();
+        } else {
+          uartRxState = UART_READ_PAYLOAD;
+        }
+        break;
+
+      case UART_READ_PAYLOAD:
+        uartRxBuffer[uartRxIndex++] = b;
+        uartRxChecksum ^= b;
+
+        if (uartRxIndex >= uartRxLength) {
+          uartRxState = UART_WAIT_CHECKSUM;
+        }
+        break;
+
+      case UART_WAIT_CHECKSUM:
+        if (b == uartRxChecksum) {
+          uartFramesOk++;
+          processTelemetryPayload(uartRxBuffer, uartRxLength);
+        } else {
+          uartChecksumErrors++;
+          Serial.print("UART checksum error. expected=0x");
+          Serial.print(uartRxChecksum, HEX);
+          Serial.print(" received=0x");
+          Serial.println(b, HEX);
+        }
+
+        resetUartParser();
+        break;
+    }
   }
+}
 
-  lastPhotoMs = now;
+void takeAndSavePhoto() {
+  Serial.println();
+  Serial.println("========== PHOTO DEBUG ==========");
+  Serial.print("Photo number: ");
+  Serial.println(photoNumber);
+  Serial.print("Free heap before capture: ");
+  Serial.println(ESP.getFreeHeap());
+  Serial.print("Free PSRAM before capture: ");
+  Serial.println(ESP.getFreePsram());
 
-  camera_fb_t * fb = esp_camera_fb_get();
+  unsigned long captureStartMs = millis();
+  camera_fb_t *fb = esp_camera_fb_get();
+  unsigned long captureElapsedMs = millis() - captureStartMs;
 
   if (!fb) {
-    Serial.println("Camera capture failed");
+    Serial.print("PHOTO ERROR: esp_camera_fb_get() returned NULL after ");
+    Serial.print(captureElapsedMs);
+    Serial.println(" ms");
+    Serial.println("=================================");
     return;
   }
 
+  Serial.print("Capture OK in ms: ");
+  Serial.println(captureElapsedMs);
+  size_t capturedLen = fb->len;
+
+  Serial.print("JPEG bytes captured: ");
+  Serial.println(capturedLen);
+  Serial.print("Frame width: ");
+  Serial.println(fb->width);
+  Serial.print("Frame height: ");
+  Serial.println(fb->height);
+
   String photoFileName = String(photoPrefix) + String(photoNumber) + ".jpg";
-  Serial.printf("Picture file name: %s\n", photoFileName.c_str());
+  Serial.print("Target path: ");
+  Serial.println(photoFileName);
+  Serial.print("/photos exists: ");
+  Serial.println(SD_MMC.exists("/photos") ? "YES" : "NO");
 
   File file = SD_MMC.open(photoFileName.c_str(), FILE_WRITE);
 
   if (!file) {
-    Serial.println("Failed to open file in writing mode");
-  } else {
-    file.write(fb->buf, fb->len);
-    file.close();
-
-    Serial.printf("Saved file to path: %s\n", photoFileName.c_str());
-    ++photoNumber;
+    Serial.println("PHOTO ERROR: SD_MMC.open(FILE_WRITE) failed");
+    esp_camera_fb_return(fb);
+    Serial.println("=================================");
+    return;
   }
+
+  unsigned long writeStartMs = millis();
+  size_t written = file.write(fb->buf, capturedLen);
+  file.flush();
+  size_t fileSizeBeforeClose = file.size();
+  file.close();
+  unsigned long writeElapsedMs = millis() - writeStartMs;
+
+  Serial.print("JPEG bytes requested: ");
+  Serial.println(capturedLen);
+  Serial.print("JPEG bytes written: ");
+  Serial.println(written);
+  Serial.print("File size before close: ");
+  Serial.println(fileSizeBeforeClose);
+  Serial.print("SD write time ms: ");
+  Serial.println(writeElapsedMs);
 
   esp_camera_fb_return(fb);
 
+  if (written != capturedLen) {
+    Serial.println("PHOTO ERROR: incomplete JPEG write");
+    Serial.println("=================================");
+    return;
+  }
+
+  if (!SD_MMC.exists(photoFileName.c_str())) {
+    Serial.println("PHOTO ERROR: file does not exist after close");
+    Serial.println("=================================");
+    return;
+  }
+
+  File verifyFile = SD_MMC.open(photoFileName.c_str(), FILE_READ);
+  if (!verifyFile) {
+    Serial.println("PHOTO ERROR: could not reopen saved JPG for verification");
+    Serial.println("=================================");
+    return;
+  }
+
+  size_t verifiedSize = verifyFile.size();
+  verifyFile.close();
+
+  Serial.print("Verified JPG size: ");
+  Serial.println(verifiedSize);
+
+  if (verifiedSize != written || verifiedSize == 0) {
+    Serial.println("PHOTO ERROR: saved JPG size mismatch");
+    Serial.println("=================================");
+    return;
+  }
+
+  Serial.print("PHOTO SAVED OK: ");
+  Serial.println(photoFileName);
+  ++photoNumber;
+  Serial.println("=================================");
+}
+
+void loop() {
+  // Always drain UART first so telemetry has priority.
   handleTelemetry();
+
+  unsigned long now = millis();
+  if (lastPhotoMs == 0 || now - lastPhotoMs >= photoIntervalMs) {
+    lastPhotoMs = now;
+    takeAndSavePhoto();
+
+    // A photo capture/write can take some time; immediately drain any
+    // telemetry that arrived while the camera/SD were busy.
+    handleTelemetry();
+  }
+
+  static unsigned long lastDebugStatsMs = 0;
+  if (now - lastDebugStatsMs >= 5000) {
+    lastDebugStatsMs = now;
+    Serial.print("UART stats | valid frames=");
+    Serial.print(uartFramesOk);
+    Serial.print(" checksum errors=");
+    Serial.print(uartChecksumErrors);
+    Serial.print(" rejected=");
+    Serial.print(uartRejectedFrames);
+    Serial.print(" rx buffered bytes=");
+    Serial.println(Serial.available());
+  }
+
+  delay(1);
 }
