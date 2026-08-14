@@ -1,105 +1,94 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Telemetry Map</title>
+  <title>Hermes CanSat Telemetry</title>
   <meta charset="utf-8" />
-
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
 
   <style>
-    body {
-      margin: 0;
-      background: #0b0f14;
-      color: white;
-      font-family: monospace;
-    }
-
-    #container {
-      display: flex;
-      height: 100vh;
-    }
-
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0b0f14; color: white; font-family: monospace; }
+    #container { display: flex; height: 100vh; }
     #panel {
-      width: 340px;
-      background: #0b0f14;
-      color: white;
-      padding: 12px;
-      border-right: 2px solid #222;
-      overflow-y: auto;
-      box-sizing: border-box;
+      width: 380px; min-width: 380px; padding: 12px; overflow-y: auto;
+      background: #0b0f14; border-right: 2px solid #222;
     }
+    #map { flex: 1; height: 100vh; width: 100%; }
+    h2 { margin: 0 0 12px; font-size: 20px; }
+    .section { margin-bottom: 16px; }
+    .title { margin: 0 0 8px; font-size: 13px; color: #7dd3fc; letter-spacing: 1px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .card { background: #000; border: 1px solid #333; padding: 10px; border-radius: 6px; min-height: 76px; }
+    .card.full { grid-column: 1 / -1; }
+    .card p { margin: 0 0 6px; font-size: 11px; color: #aaa; }
+    .card span { font-size: 20px; font-weight: bold; color: #00ff88; word-break: break-word; }
+    .status { display: inline-block; padding: 4px 8px; border: 1px solid #444; border-radius: 4px; font-size: 12px; }
+    #connection { color: #facc15; }
 
-    #map {
-      flex: 1;
-      height: 100vh;
-      width: 100%;
-    }
-
-    .section {
-      margin-bottom: 14px;
-    }
-
-    .title {
-      margin: 0 0 8px 0;
-      font-size: 14px;
-      color: #7dd3fc;
-    }
-
-    .card {
-      background: #000;
-      border: 1px solid #333;
-      margin-bottom: 8px;
-      padding: 10px;
-      border-radius: 6px;
-    }
-
-    .card p {
-      margin: 0 0 6px 0;
-      font-size: 12px;
-      color: #aaa;
-    }
-
-    .card span {
-      font-size: 24px;
-      font-weight: bold;
-      color: #00ff88;
-      word-break: break-word;
-    }
-
-    h3 {
-      margin-top: 0;
+    @media (max-width: 800px) {
+      #container { flex-direction: column; height: auto; }
+      #panel { width: 100%; min-width: 0; border-right: none; border-bottom: 2px solid #222; }
+      #map { height: 50vh; min-height: 350px; }
     }
   </style>
 </head>
 <body>
   <div id="container">
     <div id="panel">
-      <h3>Telemetry</h3>
+      <h2>HERMES TELEMETRY</h2>
 
       <div class="section">
-        <h4 class="title">ENVIRONMENT</h4>
-        <div class="card"><p>Temp BME680 (°C)</p><span id="temp">--</span></div>
-        <div class="card"><p>Pressure (hPa)</p><span id="pressure">--</span></div>
-        <div class="card"><p>Humidity (%)</p><span id="humidity">--</span></div>
-        <div class="card"><p>Gas (kΩ)</p><span id="gas">--</span></div>
+        <div class="status" id="connection">Waiting for telemetry...</div>
+      </div>
+
+      <div class="section">
+        <h4 class="title">MISSION</h4>
+        <div class="grid">
+          <div class="card"><p>Packet</p><span id="counter">--</span></div>
+          <div class="card"><p>Mission Time</p><span id="mission_time">--</span></div>
+          <div class="card"><p>Mode</p><span id="mode">--</span></div>
+          <div class="card"><p>ESP-NOW RSSI (dBm)</p><span id="rssi">--</span></div>
+        </div>
       </div>
 
       <div class="section">
         <h4 class="title">GPS</h4>
-        <div class="card"><p>Latitude</p><span id="lat">--</span></div>
-        <div class="card"><p>Longitude</p><span id="lon">--</span></div>
-        <div class="card"><p>Altitude (m)</p><span id="alt">--</span></div>
-        <div class="card"><p>Satellites</p><span id="sat">--</span></div>
-        <div class="card"><p>Speed (km/h)</p><span id="speed">--</span></div>
-        <div class="card"><p>Course (°)</p><span id="course">--</span></div>
+        <div class="grid">
+          <div class="card full"><p>Latitude</p><span id="lat">--</span></div>
+          <div class="card full"><p>Longitude</p><span id="lon">--</span></div>
+          <div class="card"><p>Altitude (m)</p><span id="alt">--</span></div>
+          <div class="card"><p>Speed (km/h)</p><span id="speed">--</span></div>
+          <div class="card"><p>Satellites</p><span id="sat">--</span></div>
+        </div>
       </div>
 
-
+      <div class="section">
+        <h4 class="title">ENVIRONMENT</h4>
+        <div class="grid">
+          <div class="card"><p>Temperature (°C)</p><span id="temp">--</span></div>
+          <div class="card"><p>Humidity (%)</p><span id="humidity">--</span></div>
+          <div class="card"><p>Pressure (hPa)</p><span id="pressure">--</span></div>
+          <div class="card"><p>Gas Resistance (kΩ)</p><span id="gas_kohm">--</span></div>
+        </div>
+      </div>
 
       <div class="section">
-        <h4 class="title">TIME</h4>
-        <div class="card"><p>Date</p><span id="date">--</span></div>
-        <div class="card"><p>Time</p><span id="time">--</span></div>
+        <h4 class="title">ACCELERATION</h4>
+        <div class="grid">
+          <div class="card"><p>Accel X (m/s²)</p><span id="accel_x">--</span></div>
+          <div class="card"><p>Accel Y (m/s²)</p><span id="accel_y">--</span></div>
+          <div class="card"><p>Accel Z (m/s²)</p><span id="accel_z">--</span></div>
+          <div class="card"><p>Accel Total (m/s²)</p><span id="accel_total">--</span></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h4 class="title">GROUND RECEIPT TIME</h4>
+        <div class="grid">
+          <div class="card"><p>Date</p><span id="date">--</span></div>
+          <div class="card"><p>Time</p><span id="time">--</span></div>
+        </div>
       </div>
     </div>
 
@@ -107,93 +96,149 @@
   </div>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-
   <script>
-    const map = L.map("map").setView([0, 0], 2);
-
+    const map = L.map("map").setView([-34.6, -58.4], 10);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: "&copy; OpenStreetMap contributors"
     }).addTo(map);
 
     let marker = null;
     let polyline = L.polyline([], { color: "red" }).addTo(map);
+    let routePoints = [];
+    let lastCounter = null;
+    let mapCentered = false;
 
     function setText(id, value, digits = null) {
       const el = document.getElementById(id);
       if (!el) return;
 
-      if (value === null || value === undefined || value === "" || Number.isNaN(value)) {
+      if (value === null || value === undefined || value === "") {
         el.innerText = "--";
         return;
       }
 
-      if (typeof value === "number" && digits !== null) {
-        el.innerText = value.toFixed(digits);
-        return;
+      if (digits !== null) {
+        const n = Number(value);
+        el.innerText = Number.isFinite(n) ? n.toFixed(digits) : "--";
+      } else {
+        el.innerText = value;
       }
+    }
 
-      const asNumber = Number(value);
-      if (!Number.isNaN(asNumber) && digits !== null && value !== "") {
-        el.innerText = asNumber.toFixed(digits);
-        return;
+    function missionModeName(mode) {
+      const n = Number(mode);
+      if (n === 0) return "PRELAUNCH";
+      if (n === 1) return "DESCENT";
+      if (n === 2) return "POST IMPACT";
+      return "UNKNOWN";
+    }
+
+    function formatMissionTime(ms) {
+      const value = Number(ms);
+      if (!Number.isFinite(value)) return "--";
+
+      const totalSeconds = Math.floor(value / 1000);
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+
+      return String(minutes).padStart(2, "0") + ":" + String(seconds).padStart(2, "0");
+    }
+
+    function validGps(lat, lon) {
+      const a = Number(lat);
+      const b = Number(lon);
+      return Number.isFinite(a) && Number.isFinite(b) && !(a === 0 && b === 0);
+    }
+
+    function showTelemetry(data) {
+      setText("counter", data.counter);
+      document.getElementById("mission_time").innerText = formatMissionTime(data.time_ms);
+      document.getElementById("mode").innerText = missionModeName(data.mode);
+      setText("rssi", data.espnow_rssi);
+
+      setText("lat", data.lat, 6);
+      setText("lon", data.lon, 6);
+      setText("alt", data.alt, 2);
+      setText("speed", data.speed, 2);
+      setText("sat", data.sat);
+
+      setText("temp", data.temp, 2);
+      setText("humidity", data.humidity, 2);
+      setText("pressure", data.pressure, 2);
+      setText("gas_kohm", data.gas_kohm, 2);
+
+      setText("accel_x", data.accel_x, 2);
+      setText("accel_y", data.accel_y, 2);
+      setText("accel_z", data.accel_z, 2);
+      setText("accel_total", data.accel_total, 2);
+
+      setText("date", data.date);
+      setText("time", data.time);
+
+      const connection = document.getElementById("connection");
+      connection.innerText = "Telemetry online";
+      connection.style.color = "#00ff88";
+
+      if (data.counter !== lastCounter && validGps(data.lat, data.lon)) {
+        lastCounter = data.counter;
+        const point = [Number(data.lat), Number(data.lon)];
+        routePoints.push(point);
+        polyline.setLatLngs(routePoints);
+
+        if (!marker) marker = L.marker(point).addTo(map);
+        else marker.setLatLng(point);
+
+        if (!mapCentered) {
+          map.setView(point, 16);
+          mapCentered = true;
+        }
       }
+    }
 
-      el.innerText = value;
+    async function loadHistory() {
+      try {
+        const res = await fetch("/api/telemetry", { cache: "no-store" });
+        const history = await res.json();
+        if (!Array.isArray(history)) return;
+
+        routePoints = history
+          .filter(p => validGps(p.lat, p.lon))
+          .map(p => [Number(p.lat), Number(p.lon)]);
+
+        if (routePoints.length > 0) {
+          polyline.setLatLngs(routePoints);
+          const latestPoint = routePoints[routePoints.length - 1];
+          marker = L.marker(latestPoint).addTo(map);
+          map.setView(latestPoint, 16);
+          mapCentered = true;
+        }
+
+        if (history.length > 0) {
+          const last = history[history.length - 1];
+          lastCounter = last.counter;
+          showTelemetry(last);
+        }
+      } catch (err) {
+        console.error("Error loading telemetry history:", err);
+      }
     }
 
     async function updateTelemetry() {
       try {
-        const res = await fetch("/api/telemetry");
+        const res = await fetch("/api/latest", { cache: "no-store" });
+        if (!res.ok) return;
         const data = await res.json();
-
-        if (!data || data.length === 0) return;
-
-        const last = data[data.length - 1];
-
-       //setText("temp", last.temp, 2);
-        setText("temp_bme", last.temp_bme, 2);
-        setText("pressure", last.pressure, 2);
-        setText("humidity", last.humidity, 2);
-        setText("gas", last.gas, 2);
-
-        setText("lat", last.lat, 6);
-        setText("lon", last.lon, 6);
-        setText("alt", last.alt, 2);
-        setText("sat", last.sat);
-        setText("speed", last.speed, 2);
-        setText("course", last.course, 2);
-/*
-        setText("roll", last.roll, 2);
-        setText("pitch", last.pitch, 2);
-        setText("yaw", last.yaw, 2);
-*/
-        setText("date", last.date);
-        setText("time", last.time);
-
-        const validPoints = data
-          .filter(p => p.lat !== null && p.lat !== undefined && p.lon !== null && p.lon !== undefined)
-          .map(p => [Number(p.lat), Number(p.lon)])
-          .filter(([lat, lon]) => !Number.isNaN(lat) && !Number.isNaN(lon));
-
-        if (validPoints.length > 0) {
-          polyline.setLatLngs(validPoints);
-
-          const point = validPoints[validPoints.length - 1];
-
-          if (!marker) {
-            marker = L.marker(point).addTo(map);
-            map.setView(point, 15);
-          } else {
-            marker.setLatLng(point);
-          }
-        }
+        showTelemetry(data);
       } catch (err) {
         console.error("Error fetching telemetry:", err);
+        const connection = document.getElementById("connection");
+        connection.innerText = "Backend unavailable";
+        connection.style.color = "#ef4444";
       }
     }
 
-    updateTelemetry();
-    setInterval(updateTelemetry, 2000);
+    loadHistory();
+    setInterval(updateTelemetry, 1000);
   </script>
 </body>
 </html>
