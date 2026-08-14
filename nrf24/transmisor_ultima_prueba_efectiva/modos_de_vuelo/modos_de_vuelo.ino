@@ -1,7 +1,4 @@
-
 #include <Wire.h>
-#include <SPI.h>
-#include <RF24.h>
 #include <math.h>
 
 #include <Adafruit_Sensor.h>
@@ -9,104 +6,82 @@
 #include <Adafruit_MPU6050.h>
 #include <TinyGPS++.h>
 #include <Adafruit_VL53L0X.h>
+
 HardwareSerial CamSerial(1);
 
-// =========================
-// nRF24
-// =========================
-#define NRF_CE 25
-#define NRF_CSN 26
+// ======================================================
+// UART framing ESP32 -> ESP32-CAM
+// Frame: 0xAA 0x55 | payload_length | payload | XOR checksum
+// ======================================================
 
-RF24 radio(NRF_CE, NRF_CSN);
-const byte address[6] = "GAAY1";
+const uint8_t UART_SYNC_1 = 0xAA;
+const uint8_t UART_SYNC_2 = 0x55;
 
-// Keep packet explicitly 32 bytes for nRF24 compatibility
-/*struct TelemetryPacket {
-  uint32_t counter;
-  float lat;
-  float lon;
-  float alt;
-  float temp;
-  float pressure;
-  float humidity;
-  uint8_t sat;
-  uint8_t padding[3];
-};*/
+// ======================================================
+// HERMES TELEMETRY PACKET
+// ======================================================
 
 struct __attribute__((packed)) TelemetryPacket {
-  uint8_t packetType;
-  uint8_t version;
-
   uint32_t counter;
   uint32_t time_ms;
 
   float lat;
   float lon;
   float alt;
-  float temp;
-  float pressure;
-  float humidity;
-
+  float speed;          // km/h
   uint8_t sat;
-  uint8_t reserved[1];
+
+  float temp;           // deg C
+  float humidity;       // %
+  float pressure;       // hPa
+  float gas_kohm;       // kOhm
+
+  int16_t accel_x_cms2;
+  int16_t accel_y_cms2;
+  int16_t accel_z_cms2;
+  int16_t accel_total_cms2;
+
+  uint8_t mode;
 };
 
-struct __attribute__((packed)) TelemetryAttitudePacket {
-  uint8_t packetType;      // PACKET_ATTITUDE
-  uint8_t version;         // packet format version
+static_assert(
+  sizeof(TelemetryPacket) == 50,
+  "TelemetryPacket must be exactly 50 bytes"
+);
 
-  uint32_t counter;        // packet counter
-  uint32_t time_ms;        // time since mission start
-
-  uint16_t lidar_mm;       // LiDAR distance in millimeters
-
-  int16_t roll_deg10;      // roll angle * 10
-  int16_t pitch_deg10;     // pitch angle * 10
-  int16_t yaw_deg10;       // yaw angle * 10
-
-  uint8_t mode;            // mission mode
-  uint8_t lidar_status;    // 0 invalid, 1 valid
-  uint8_t mpu_status;      // 0 invalid, 1 valid
-
-  uint8_t reserved[11];    // keep packet at 32 bytes
-};
-
-static_assert(sizeof(TelemetryAttitudePacket) == 32, "TelemetryAttitudePacket must be 32 bytes");
-
-
-enum PacketType : uint8_t {
-  PACKET_CORE = 1,
-  PACKET_ATTITUDE = 2
-};
-
-const uint8_t PACKET_VERSION = 1;
 TelemetryPacket packet;
 
-// =========================
+// ======================================================
 // GPS
-// =========================
+// ======================================================
+
 #define RXD2 16
 #define TXD2 17
 
-//cam
+TinyGPSPlus gps;
+
+// ======================================================
+// ESP32-CAM UART
+// ======================================================
 
 #define CAM_UART_RX 14
 #define CAM_UART_TX 27
 
-TinyGPSPlus gps;
-
-// =========================
+// ======================================================
 // VL53L0X LiDAR
-// =========================
+// Kept for local mission/debug use only.
+// ======================================================
+
 Adafruit_VL53L0X lidar = Adafruit_VL53L0X();
 
 bool lidarOk = false;
 bool lidarValid = false;
 uint16_t lidarDistanceMm = 0;
 
-// =========================
+// ======================================================
 // MPU6050
-// =========================
+// ======================================================
+
 Adafruit_MPU6050 mpu;
 
 float ax = NAN;
@@ -121,17 +96,25 @@ float rollDeg = NAN;
 float pitchDeg = NAN;
 float yawDeg = 0.0f;
 
+float accelTotal = NAN;
+
 bool mpuValid = false;
 bool mpuAngleInitialized = false;
-
-unsigned long lastMpuAngleMs = 0;
-
-float accelTotal = NAN;
 bool mpuOk = false;
 
-// =========================
+float gyroOffsetX = 0.0f;
+float gyroOffsetY = 0.0f;
+float gyroOffsetZ = 0.0f;
+
+const uint32_t MPU_INTERVAL_US = 20000; // 50 Hz
+uint32_t lastMpuSampleUs = 0;
+
+const float MPU_FILTER_TAU_S = 0.50f;
+
+// ======================================================
 // BME680
-// =========================
+// ======================================================
+
 Adafruit_BME680 bme;
 
 float lastBmeTemp = NAN;
@@ -139,34 +122,28 @@ float lastPressure = NAN;
 float lastHumidity = NAN;
 float lastGas = NAN;
 
-//GPS variables globales
+// ======================================================
+// Last known GPS position
+// ======================================================
+
 float lastKnownLat = 0.0f;
 float lastKnownLon = 0.0f;
 float lastKnownAlt = 0.0f;
 uint8_t lastKnownSat = 0;
+
 bool hasLastKnownGps = false;
 
-// =========================
+// ======================================================
 // Timing
-// =========================
+// ======================================================
+
 unsigned long lastSendMs = 0;
 const unsigned long sendIntervalMs = 750;
 
-// =========================
-// Function declarations
-// =========================
-void updateGPS();
-void updateEnvironmentalSensors();
-void sendRadioPacket();
-void handlePrelaunch();
-void handleDescent();
-void handlePostImpact();
-void updateMPU6050();
-void updateLidar();
-void sendTelemetryCycle();
-// =========================
+// ======================================================
 // Mission modes
-// =========================
+// ======================================================
+
 enum MissionMode : uint8_t {
   MODE_PRELAUNCH = 0,
   MODE_DESCENT = 1,
@@ -178,15 +155,46 @@ MissionMode currentMode = MODE_PRELAUNCH;
 unsigned long missionStartMs = 0;
 unsigned long modeStartMs = 0;
 
+// ======================================================
+// Function declarations
+// ======================================================
+
+void updateGPS();
+void updateEnvironmentalSensors();
+void updateLidar();
+
+void updateMPU6050();
+bool calibrateMPU6050(uint16_t samples = 500);
+void printMPUReport();
+void printMPUAngleReport();
+
+float wrapAngle180(float angleDeg);
+float complementaryAngle(float gyroPredictionDeg, float accelAngleDeg, float alpha);
+
+int16_t accelToCms2(float accel_ms2);
+
+size_t sendFramedUartPacket(const uint8_t *data, uint8_t length);
+void sendTelemetryPacket();
+void sendTelemetryCycle();
+
+void handlePrelaunch();
+void handleDescent();
+void handlePostImpact();
+
+void setMissionMode(MissionMode newMode);
+
+// ======================================================
+// Mission mode control
+// ======================================================
+
 void setMissionMode(MissionMode newMode) {
   currentMode = newMode;
   modeStartMs = millis();
 }
 
-void sendTelemetryCycle() {
-  sendRadioPacket();      // existing CORE packet
-  sendAttitudePacket();   // new LiDAR + MPU packet
-}
+// ======================================================
+// Setup
+// ======================================================
 
 void setup() {
   Serial.begin(115200);
@@ -196,30 +204,31 @@ void setup() {
   modeStartMs = missionStartMs;
   currentMode = MODE_PRELAUNCH;
 
+  CamSerial.setRxBufferSize(2048);
   CamSerial.begin(115200, SERIAL_8N1, CAM_UART_RX, CAM_UART_TX);
-  Serial.print("ESP32-CAM UART logger ready");
-  // I2C: default ESP32 pins SDA=21, SCL=22
+
+  Serial.println("ESP32-CAM UART link ready");
+
   Wire.begin(21, 22);
 
-  // GPS UART
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
 
-  // LiDAR VL53L0X
   if (!lidar.begin()) {
     Serial.println("VL53L0X LiDAR not detected");
-    lidarOk = false; 
+    lidarOk = false;
   } else {
     Serial.println("VL53L0X LiDAR detected");
     lidarOk = true;
   }
 
-  // BME680
   if (!bme.begin(0x77)) {
     Serial.println("BME680 not found at 0x77, trying 0x76...");
 
     if (!bme.begin(0x76)) {
       Serial.println("BME680 not detected");
-      while (1);
+      while (1) {
+        delay(1000);
+      }
     }
   }
 
@@ -231,13 +240,9 @@ void setup() {
 
   Serial.println("BME680 detected");
 
-  // nRF24 SPI
-  SPI.begin(18, 19, 23, NRF_CSN);
-
-  // MPU6050
   if (!mpu.begin()) {
-  Serial.println("MPU6050 not detected");
-  mpuOk = false;
+    Serial.println("MPU6050 not detected");
+    mpuOk = false;
   } else {
     Serial.println("MPU6050 detected");
     mpuOk = true;
@@ -245,59 +250,71 @@ void setup() {
     mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
     mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+    delay(250);
+    calibrateMPU6050();
+    updateMPU6050();
   }
 
-    if (!radio.begin()) {
-      Serial.println("nRF24 not detected");
-      while (1);
-    }
-
-  radio.openWritingPipe(address);
-  radio.setChannel(108);
-  radio.setDataRate(RF24_250KBPS);
-  radio.setPALevel(RF24_PA_LOW);
-  radio.setAutoAck(true);
-  radio.stopListening();
-
   packet.counter = 0;
-  packet.padding[0] = 0;
-  packet.padding[1] = 0;
-  packet.padding[2] = 0;
+  packet.time_ms = 0;
 
-  Serial.println("Payload ready: GPS + BME680 + nRF24 TX");
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("Hermes onboard computer ready");
+  Serial.print("TelemetryPacket size: ");
+  Serial.print(sizeof(TelemetryPacket));
+  Serial.println(" bytes");
+  Serial.println("======================================");
 }
+
+// ======================================================
+// Main loop
+// ======================================================
 
 void loop() {
   updateGPS();
 
-  unsigned long now = millis();
-if (now - lastSendMs >= sendIntervalMs) {
-  lastSendMs = now;
-
-  if (currentMode == MODE_PRELAUNCH) {
-  handlePrelaunch();
-} else if (currentMode == MODE_DESCENT) {
-  handleDescent();
-} else if (currentMode == MODE_POST_IMPACT) {
-  handlePostImpact();
-}
-    }
+  while (CamSerial.available()) {
+    Serial.write(CamSerial.read());
   }
 
+  uint32_t nowUs = micros();
 
+  if ((uint32_t)(nowUs - lastMpuSampleUs) >= MPU_INTERVAL_US) {
+    updateMPU6050();
+  }
+
+  unsigned long now = millis();
+
+  if (now - lastSendMs >= sendIntervalMs) {
+    lastSendMs = now;
+
+    if (currentMode == MODE_PRELAUNCH) {
+      handlePrelaunch();
+    } else if (currentMode == MODE_DESCENT) {
+      handleDescent();
+    } else if (currentMode == MODE_POST_IMPACT) {
+      handlePostImpact();
+    }
+  }
+}
+
+// ======================================================
+// Mission handlers
+// ======================================================
 
 void handlePrelaunch() {
-  Serial.println("\n===== PRELAUNCH MODE =====");
+  Serial.println();
+  Serial.println("===== PRELAUNCH MODE =====");
 
   updateEnvironmentalSensors();
-  updateMPU6050();
-  updateMPUAngles();
+  printMPUReport();
+  printMPUAngleReport();
   updateLidar();
 
-  
-
   bool gpsOk = gps.location.isValid() && gps.location.age() < 3000;
-  bool bmeOk = !isnan(lastBmeTemp) && !isnan(lastPressure) && !isnan(lastHumidity);
+  bool bmeOk = isfinite(lastBmeTemp) && isfinite(lastPressure) && isfinite(lastHumidity);
 
   Serial.print("GPS ready: ");
   Serial.println(gpsOk ? "YES" : "NO");
@@ -305,28 +322,37 @@ void handlePrelaunch() {
   Serial.print("BME680 ready: ");
   Serial.println(bmeOk ? "YES" : "NO");
 
-  
-
   Serial.print("Prelaunch status: ");
-  if (gpsOk && bmeOk) {
-    Serial.println("READY");
-  } else {
-    Serial.println("NOT READY");
-  }
+  Serial.println((gpsOk && bmeOk) ? "READY" : "NOT READY");
+
   sendTelemetryCycle();
 }
+
 void handleDescent() {
-  Serial.println("\n===== DESCENT MODE =====");
+  Serial.println();
+  Serial.println("===== DESCENT MODE =====");
 
   updateEnvironmentalSensors();
-  updateMPU6050();
+  printMPUReport();
+  printMPUAngleReport();
+  updateLidar();
 
   sendTelemetryCycle();
 }
+
 void handlePostImpact() {
-  Serial.println("\n===== POST IMPACT MODE =====");
+  Serial.println();
+  Serial.println("===== POST IMPACT MODE =====");
+
+  updateEnvironmentalSensors();
+  printMPUReport();
+
   sendTelemetryCycle();
 }
+
+// ======================================================
+// GPS
+// ======================================================
 
 void updateGPS() {
   while (Serial2.available() > 0) {
@@ -334,15 +360,50 @@ void updateGPS() {
   }
 }
 
+// ======================================================
+// BME680
+// ======================================================
+
+void updateEnvironmentalSensors() {
+  if (bme.performReading()) {
+    lastBmeTemp = bme.temperature;
+    lastPressure = bme.pressure / 100.0f;
+    lastHumidity = bme.humidity;
+    lastGas = bme.gas_resistance / 1000.0f;
+  } else {
+    Serial.println("BME680 reading failed");
+  }
+
+  Serial.println();
+  Serial.println("===== PAYLOAD SENSOR REPORT =====");
+
+  Serial.print("GPS valid: ");
+  Serial.println(gps.location.isValid() ? "yes" : "no");
+
+  Serial.print("BME680 Temp C: ");
+  Serial.println(lastBmeTemp);
+
+  Serial.print("Pressure hPa: ");
+  Serial.println(lastPressure);
+
+  Serial.print("Humidity %: ");
+  Serial.println(lastHumidity);
+
+  Serial.print("Gas kOhm: ");
+  Serial.println(lastGas);
+}
+
+// ======================================================
+// LiDAR
+// ======================================================
+
 void updateLidar() {
   if (!lidarOk) {
-    Serial.println("LiDAR not available");
     lidarValid = false;
     return;
   }
 
   VL53L0X_RangingMeasurementData_t measure;
-
   lidar.rangingTest(&measure, false);
 
   if (measure.RangeStatus != 4) {
@@ -352,7 +413,8 @@ void updateLidar() {
     lidarValid = false;
   }
 
-  Serial.println("\n===== LIDAR REPORT =====");
+  Serial.println();
+  Serial.println("===== LIDAR REPORT =====");
 
   Serial.print("LiDAR valid: ");
   Serial.println(lidarValid ? "YES" : "NO");
@@ -365,77 +427,84 @@ void updateLidar() {
   }
 }
 
+// ======================================================
+// MPU6050 calibration
+// ======================================================
 
-void updateMPU6050() {
-  if (!mpuOk) {
-    Serial.println("MPU6050 not available");
-    return;
+bool calibrateMPU6050(uint16_t samples) {
+  if (!mpuOk || samples == 0) {
+    return false;
   }
+
+  Serial.println();
+  Serial.println("===== MPU6050 GYRO CALIBRATION =====");
+  Serial.println("Keep the CanSat completely still...");
+
+  double sumX = 0.0;
+  double sumY = 0.0;
+  double sumZ = 0.0;
 
   sensors_event_t accelEvent;
   sensors_event_t gyroEvent;
   sensors_event_t tempEvent;
 
-  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  for (uint16_t i = 0; i < samples; i++) {
+    mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
 
-  ax = accelEvent.acceleration.x;
-  ay = accelEvent.acceleration.y;
-  az = accelEvent.acceleration.z;
+    sumX += gyroEvent.gyro.x;
+    sumY += gyroEvent.gyro.y;
+    sumZ += gyroEvent.gyro.z;
 
-  gx = gyroEvent.gyro.x;
-  gy = gyroEvent.gyro.y;
-  gz = gyroEvent.gyro.z;
-
-  accelTotal = sqrt((ax * ax) + (ay * ay) + (az * az));
-
-  Serial.println("\n===== MPU6050 REPORT =====");
-
-  Serial.print("Accel m/s^2: ");
-  Serial.print(ax);
-  Serial.print(", ");
-  Serial.print(ay);
-  Serial.print(", ");
-  Serial.println(az);
-
-  Serial.print("Gyro rad/s: ");
-  Serial.print(gx);
-  Serial.print(", ");
-  Serial.print(gy);
-  Serial.print(", ");
-  Serial.println(gz);
-
-  Serial.print("Accel total m/s^2: ");
-  Serial.println(accelTotal);
-}
-
-void updateEnvironmentalSensors() {
-  if (bme.performReading()) {
-    lastBmeTemp  = bme.temperature;
-    lastPressure = bme.pressure / 100.0f;       // Pa -> hPa
-    lastHumidity = bme.humidity;
-    lastGas      = bme.gas_resistance / 1000.0f; // ohms -> KOhms
-  } else {
-    Serial.println("BME680 reading failed");
+    delay(5);
   }
 
-  Serial.println("\n===== PAYLOAD SENSOR REPORT =====");
+  gyroOffsetX = (float)(sumX / samples);
+  gyroOffsetY = (float)(sumY / samples);
+  gyroOffsetZ = (float)(sumZ / samples);
 
-  Serial.print("GPS valid: ");
-  Serial.println(gps.location.isValid() ? "yes" : "no");
+  mpuAngleInitialized = false;
+  lastMpuSampleUs = micros();
 
-  Serial.print("BME680 Temp: ");
-  Serial.println(lastBmeTemp);
+  Serial.print("Gyro offset X rad/s: ");
+  Serial.println(gyroOffsetX, 6);
 
-  Serial.print("Pressure hPa: ");
-  Serial.println(lastPressure);
+  Serial.print("Gyro offset Y rad/s: ");
+  Serial.println(gyroOffsetY, 6);
 
-  Serial.print("Humidity %: ");
-  Serial.println(lastHumidity);
+  Serial.print("Gyro offset Z rad/s: ");
+  Serial.println(gyroOffsetZ, 6);
 
-  Serial.print("Gas KOhms: ");
-  Serial.println(lastGas);
+  Serial.println("MPU6050 gyro calibration complete");
+
+  return true;
 }
-void updateMPUAngles() {
+
+// ======================================================
+// MPU6050 angle helpers
+// ======================================================
+
+float wrapAngle180(float angleDeg) {
+  while (angleDeg > 180.0f) {
+    angleDeg -= 360.0f;
+  }
+
+  while (angleDeg < -180.0f) {
+    angleDeg += 360.0f;
+  }
+
+  return angleDeg;
+}
+
+float complementaryAngle(float gyroPredictionDeg, float accelAngleDeg, float alpha) {
+  float errorDeg = wrapAngle180(accelAngleDeg - gyroPredictionDeg);
+  return wrapAngle180(gyroPredictionDeg + (1.0f - alpha) * errorDeg);
+}
+
+// ======================================================
+// MPU6050 update
+// ======================================================
+
+void updateMPU6050() {
   if (!mpuOk) {
     mpuValid = false;
     return;
@@ -447,43 +516,99 @@ void updateMPUAngles() {
 
   mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
 
-  unsigned long now = millis();
-
+  uint32_t nowUs = micros();
   float dt = 0.0f;
-  if (lastMpuAngleMs != 0) {
-    dt = (now - lastMpuAngleMs) / 1000.0f;
+
+  if (lastMpuSampleUs != 0) {
+    dt = (uint32_t)(nowUs - lastMpuSampleUs) / 1000000.0f;
   }
 
-  lastMpuAngleMs = now;
+  lastMpuSampleUs = nowUs;
 
-  float ax = accelEvent.acceleration.x;
-  float ay = accelEvent.acceleration.y;
-  float az = accelEvent.acceleration.z;
+  ax = accelEvent.acceleration.x;
+  ay = accelEvent.acceleration.y;
+  az = accelEvent.acceleration.z;
 
-  float gyroXDegS = gyroEvent.gyro.x * 57.2957795f;
-  float gyroYDegS = gyroEvent.gyro.y * 57.2957795f;
-  float gyroZDegS = gyroEvent.gyro.z * 57.2957795f;
+  gx = gyroEvent.gyro.x - gyroOffsetX;
+  gy = gyroEvent.gyro.y - gyroOffsetY;
+  gz = gyroEvent.gyro.z - gyroOffsetZ;
+
+  accelTotal = sqrtf((ax * ax) + (ay * ay) + (az * az));
 
   float accRollDeg = atan2f(ay, az) * 180.0f / PI;
   float accPitchDeg = atan2f(-ax, sqrtf((ay * ay) + (az * az))) * 180.0f / PI;
 
-  if (!mpuAngleInitialized || dt <= 0.0f || dt > 1.0f) {
+  const float RAD_TO_DEG_F = 57.2957795f;
+
+  float gyroXDegS = gx * RAD_TO_DEG_F;
+  float gyroYDegS = gy * RAD_TO_DEG_F;
+  float gyroZDegS = gz * RAD_TO_DEG_F;
+
+  if (!mpuAngleInitialized) {
     rollDeg = accRollDeg;
     pitchDeg = accPitchDeg;
     yawDeg = 0.0f;
     mpuAngleInitialized = true;
-  } else {
-    rollDeg = 0.98f * (rollDeg + gyroXDegS * dt) + 0.02f * accRollDeg;
-    pitchDeg = 0.98f * (pitchDeg + gyroYDegS * dt) + 0.02f * accPitchDeg;
-    yawDeg += gyroZDegS * dt;
+  }
+  else if (dt > 0.0f && dt <= 0.20f) {
+    float alpha = MPU_FILTER_TAU_S / (MPU_FILTER_TAU_S + dt);
+
+    float rollPrediction = wrapAngle180(rollDeg + gyroXDegS * dt);
+    float pitchPrediction = wrapAngle180(pitchDeg + gyroYDegS * dt);
+
+    rollDeg = complementaryAngle(rollPrediction, accRollDeg, alpha);
+    pitchDeg = complementaryAngle(pitchPrediction, accPitchDeg, alpha);
+    yawDeg = wrapAngle180(yawDeg + gyroZDegS * dt);
+  }
+  else if (dt > 0.20f) {
+    rollDeg = accRollDeg;
+    pitchDeg = accPitchDeg;
   }
 
-  while (yawDeg > 180.0f) yawDeg -= 360.0f;
-  while (yawDeg < -180.0f) yawDeg += 360.0f;
+  mpuValid =
+    isfinite(ax) &&
+    isfinite(ay) &&
+    isfinite(az) &&
+    isfinite(gx) &&
+    isfinite(gy) &&
+    isfinite(gz) &&
+    isfinite(accelTotal);
+}
 
-  mpuValid = isfinite(rollDeg) && isfinite(pitchDeg) && isfinite(yawDeg);
+// ======================================================
+// MPU debug
+// ======================================================
 
-  Serial.println("\n===== MPU ANGLE REPORT =====");
+void printMPUReport() {
+  Serial.println();
+  Serial.println("===== MPU6050 REPORT =====");
+
+  if (!mpuOk) {
+    Serial.println("MPU6050 not available");
+    return;
+  }
+
+  Serial.print("Accel m/s^2: ");
+  Serial.print(ax);
+  Serial.print(", ");
+  Serial.print(ay);
+  Serial.print(", ");
+  Serial.println(az);
+
+  Serial.print("Gyro corrected rad/s: ");
+  Serial.print(gx, 4);
+  Serial.print(", ");
+  Serial.print(gy, 4);
+  Serial.print(", ");
+  Serial.println(gz, 4);
+
+  Serial.print("Accel total m/s^2: ");
+  Serial.println(accelTotal);
+}
+
+void printMPUAngleReport() {
+  Serial.println();
+  Serial.println("===== MPU ANGLE REPORT =====");
 
   Serial.print("Roll deg: ");
   Serial.println(rollDeg);
@@ -491,123 +616,181 @@ void updateMPUAngles() {
   Serial.print("Pitch deg: ");
   Serial.println(pitchDeg);
 
-  Serial.print("Yaw deg: ");
+  Serial.print("Yaw deg (relative): ");
   Serial.println(yawDeg);
 
   Serial.print("MPU valid: ");
   Serial.println(mpuValid ? "YES" : "NO");
 }
 
-int16_t angleToDeg10(float angleDeg) {
-  if (!isfinite(angleDeg)) {
+// ======================================================
+// Acceleration conversion
+// m/s^2 -> cm/s^2
+// -32768 is reserved as invalid.
+// ======================================================
+
+int16_t accelToCms2(float accel_ms2) {
+  if (!isfinite(accel_ms2)) {
     return -32768;
   }
 
-  float scaled = angleDeg * 10.0f;
+  float scaled = accel_ms2 * 100.0f;
 
-  if (scaled > 32767.0f) scaled = 32767.0f;
-  if (scaled < -32767.0f) scaled = -32767.0f;
+  if (scaled > 32767.0f) {
+    scaled = 32767.0f;
+  }
+
+  if (scaled < -32767.0f) {
+    scaled = -32767.0f;
+  }
 
   return (int16_t)lroundf(scaled);
 }
 
+// ======================================================
+// UART frame writer
+// ======================================================
 
-void sendRadioPacket() {
+size_t sendFramedUartPacket(const uint8_t *data, uint8_t length) {
+  uint8_t checksum = length;
 
+  for (uint8_t i = 0; i < length; i++) {
+    checksum ^= data[i];
+  }
+
+  size_t totalSent = 0;
+
+  totalSent += CamSerial.write(UART_SYNC_1);
+  totalSent += CamSerial.write(UART_SYNC_2);
+  totalSent += CamSerial.write(length);
+  totalSent += CamSerial.write(data, length);
+  totalSent += CamSerial.write(checksum);
+
+  return totalSent;
+}
+
+// ======================================================
+// Single telemetry packet
+// ======================================================
+
+void sendTelemetryPacket() {
   bool gpsOk = gps.location.isValid() && gps.location.age() < 3000;
 
   packet.counter++;
+  packet.time_ms = millis() - missionStartMs;
 
-if (gpsOk) {
-  packet.lat = gps.location.lat();
-  packet.lon = gps.location.lng();
-  packet.alt = gps.altitude.isValid() ? gps.altitude.meters() : 0.0f;
-  packet.sat = gps.satellites.isValid() ? gps.satellites.value() : 0;
+  if (gpsOk) {
+    packet.lat = (float)gps.location.lat();
+    packet.lon = (float)gps.location.lng();
 
-  lastKnownLat = packet.lat;
-  lastKnownLon = packet.lon;
-  lastKnownAlt = packet.alt;
-  lastKnownSat = packet.sat;
-  hasLastKnownGps = true;
+    packet.alt = gps.altitude.isValid()
+      ? (float)gps.altitude.meters()
+      : 0.0f;
 
-  packet.padding[1] = 1;  // current GPS valid
-} 
-else if (hasLastKnownGps) {
-  packet.lat = lastKnownLat;
-  packet.lon = lastKnownLon;
-  packet.alt = lastKnownAlt;
-  packet.sat = lastKnownSat;
+    packet.speed = gps.speed.isValid()
+      ? (float)gps.speed.kmph()
+      : 0.0f;
 
-  packet.padding[1] = 2;  // using last known GPS
-} 
-else {
-  packet.lat = 0.0f;
-  packet.lon = 0.0f;
-  packet.alt = 0.0f;
-  packet.sat = 0;
+    packet.sat = gps.satellites.isValid()
+      ? (uint8_t)gps.satellites.value()
+      : 0;
 
-  packet.padding[1] = 0;  // no GPS available
-}
-
-  packet.temp = isnan(lastBmeTemp) ? -999.0f : lastBmeTemp;
-  packet.pressure = isnan(lastPressure) ? -999.0f : lastPressure;
-  packet.humidity = isnan(lastHumidity) ? -999.0f : lastHumidity;
-
-  packet.padding[0] = (uint8_t)currentMode;
-  packet.padding[1] = gpsOk ? 1 : 0;
-  packet.padding[2] = PACKET_CORE;
-
-  bool ok = radio.write(&packet, sizeof(packet));
-
-  CamSerial.write((uint8_t *)&packet, sizeof(packet));
-
-  Serial.print("nRF24 packet ");
-  Serial.print(packet.counter);
-  Serial.print(" size=");
-  Serial.print(sizeof(packet));
-  Serial.print(" bytes status: ");
-  Serial.println(ok ? "OK" : "FAIL");
-}
-
-void sendAttitudePacket() {
-  TelemetryAttitudePacket attitude;
-
-  attitude.packetType = PACKET_ATTITUDE;
-  attitude.version = PACKET_VERSION;
-
-  attitude.counter = packet.counter;
-  attitude.time_ms = millis() - missionStartMs;
-
-  attitude.lidar_mm = lidarValid ? lidarDistanceMm : 0;
-
-  attitude.roll_deg10 = angleToDeg10(rollDeg);
-  attitude.pitch_deg10 = angleToDeg10(pitchDeg);
-  attitude.yaw_deg10 = angleToDeg10(yawDeg);
-
-  attitude.mode = (uint8_t)currentMode;
-  attitude.lidar_status = lidarValid ? 1 : 0;
-  attitude.mpu_status = mpuValid ? 1 : 0;
-
-  for (int i = 0; i < 11; i++) {
-    attitude.reserved[i] = 0;
+    lastKnownLat = packet.lat;
+    lastKnownLon = packet.lon;
+    lastKnownAlt = packet.alt;
+    lastKnownSat = packet.sat;
+    hasLastKnownGps = true;
+  }
+  else if (hasLastKnownGps) {
+    packet.lat = lastKnownLat;
+    packet.lon = lastKnownLon;
+    packet.alt = lastKnownAlt;
+    packet.sat = lastKnownSat;
+    packet.speed = 0.0f;
+  }
+  else {
+    packet.lat = 0.0f;
+    packet.lon = 0.0f;
+    packet.alt = 0.0f;
+    packet.speed = 0.0f;
+    packet.sat = 0;
   }
 
-  bool ok = radio.write(&attitude, sizeof(attitude));
+  packet.temp = isfinite(lastBmeTemp) ? lastBmeTemp : -999.0f;
+  packet.humidity = isfinite(lastHumidity) ? lastHumidity : -999.0f;
+  packet.pressure = isfinite(lastPressure) ? lastPressure : -999.0f;
+  packet.gas_kohm = isfinite(lastGas) ? lastGas : -999.0f;
 
-  CamSerial.write((uint8_t *)&attitude, sizeof(attitude));
+  packet.accel_x_cms2 = accelToCms2(ax);
+  packet.accel_y_cms2 = accelToCms2(ay);
+  packet.accel_z_cms2 = accelToCms2(az);
+  packet.accel_total_cms2 = accelToCms2(accelTotal);
 
-  Serial.print("ATTITUDE packet ");
-  Serial.print(attitude.counter);
-  Serial.print(" time_ms=");
-  Serial.print(attitude.time_ms);
-  Serial.print(" lidar=");
-  Serial.print(attitude.lidar_mm);
-  Serial.print(" roll=");
-  Serial.print(attitude.roll_deg10 / 10.0f);
-  Serial.print(" pitch=");
-  Serial.print(attitude.pitch_deg10 / 10.0f);
-  Serial.print(" yaw=");
-  Serial.print(attitude.yaw_deg10 / 10.0f);
-  Serial.print(" status: ");
-  Serial.println(ok ? "OK" : "FAIL");
+  packet.mode = (uint8_t)currentMode;
+
+  size_t bytesSent = sendFramedUartPacket(
+    (const uint8_t *)&packet,
+    sizeof(packet)
+  );
+
+  Serial.println();
+  Serial.println("===== TELEMETRY PACKET =====");
+
+  Serial.print("Counter: ");
+  Serial.println(packet.counter);
+
+  Serial.print("Mission time ms: ");
+  Serial.println(packet.time_ms);
+
+  Serial.print("Lat: ");
+  Serial.println(packet.lat, 6);
+
+  Serial.print("Lon: ");
+  Serial.println(packet.lon, 6);
+
+  Serial.print("Alt m: ");
+  Serial.println(packet.alt);
+
+  Serial.print("Speed km/h: ");
+  Serial.println(packet.speed);
+
+  Serial.print("Satellites: ");
+  Serial.println(packet.sat);
+
+  Serial.print("Temperature C: ");
+  Serial.println(packet.temp);
+
+  Serial.print("Humidity %: ");
+  Serial.println(packet.humidity);
+
+  Serial.print("Pressure hPa: ");
+  Serial.println(packet.pressure);
+
+  Serial.print("Gas kOhm: ");
+  Serial.println(packet.gas_kohm);
+
+  Serial.print("Accel X cm/s^2: ");
+  Serial.println(packet.accel_x_cms2);
+
+  Serial.print("Accel Y cm/s^2: ");
+  Serial.println(packet.accel_y_cms2);
+
+  Serial.print("Accel Z cm/s^2: ");
+  Serial.println(packet.accel_z_cms2);
+
+  Serial.print("Accel total cm/s^2: ");
+  Serial.println(packet.accel_total_cms2);
+
+  Serial.print("Mission mode: ");
+  Serial.println(packet.mode);
+
+  Serial.print("Payload bytes: ");
+  Serial.println(sizeof(packet));
+
+  Serial.print("UART frame bytes sent: ");
+  Serial.println(bytesSent);
+}
+
+void sendTelemetryCycle() {
+  sendTelemetryPacket();
 }
