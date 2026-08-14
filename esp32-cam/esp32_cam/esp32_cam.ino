@@ -400,9 +400,11 @@ void setup() {
   // SD
   // ----------------------------------------------------
 
-  Serial.println("Initialising SD card");
+  Serial.println("Initialising SD card in 1-bit mode");
 
-  if (!SD_MMC.begin()) {
+  // 1-bit SDMMC mode frees GPIO4, which is shared with the
+  // onboard flash LED on the AI-Thinker ESP32-CAM.
+  if (!SD_MMC.begin("/sdcard", true)) {
     Serial.println(
       "Failed to initialise SD card!"
     );
@@ -418,6 +420,13 @@ void setup() {
     );
     return;
   }
+
+  // GPIO4 is now free because SDMMC is running in 1-bit mode.
+  // Keep the ESP32-CAM white flash LED permanently off.
+  pinMode(4, OUTPUT);
+  digitalWrite(4, LOW);
+
+  Serial.println("Flash LED disabled on GPIO4");
 
   // ----------------------------------------------------
   // Directories
