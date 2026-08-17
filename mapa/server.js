@@ -6,68 +6,274 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
+
+// ======================================================
+// TELEMETRY STORAGE
+// ======================================================
+
+// 2000 muestras a 750 ms por muestra son aproximadamente
+// 25 minutos de telemetría.
+const MAX_HISTORY = 2000;
+
 let telemetryHistory = [];
+
+
+// ======================================================
+// HELPERS
+// ======================================================
+
+function numberOrNull(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return null;
+  }
+
+  const n = Number(value);
+
+  return Number.isFinite(n)
+    ? n
+    : null;
+}
+
+
+// ======================================================
+// GET TELEMETRY HISTORY
+// ======================================================
 
 app.get("/api/telemetry", (req, res) => {
   res.json(telemetryHistory);
 });
 
+
+// ======================================================
+// GET LATEST TELEMETRY SAMPLE
+// ======================================================
+
+app.get("/api/latest", (req, res) => {
+
+  if (telemetryHistory.length === 0) {
+    return res.status(404).json({
+      ok: false,
+      message: "No telemetry received yet"
+    });
+  }
+
+  res.json(
+    telemetryHistory[
+      telemetryHistory.length - 1
+    ]
+  );
+});
+
+
+// ======================================================
+// POST TELEMETRY
+// ======================================================
+
 app.post("/api/telemetry", (req, res) => {
+
   const data = req.body;
   const now = new Date();
 
+
   const entry = {
-    packetType: data.packetType ?? null,
-    version: data.version ?? null,
-    counter: data.counter ?? null,
-    mode: data.mode ?? null,
-    lidar_status: data.lidar_status ?? null,
-    mpu_status: data.mpu_status ?? null,
-    mission_time_ms: data.time_ms ?? data.mission_time_ms ?? null,
 
+    // ==================================================
+    // Mission
+    // ==================================================
+
+    counter:
+      numberOrNull(data.counter),
+
+    time_ms:
+      numberOrNull(data.time_ms),
+
+    mode:
+      numberOrNull(data.mode),
+
+
+    // ==================================================
     // GPS
-    lat: data.lat ?? null,
-    lon: data.lon ?? null,
-    alt: data.alt ?? null,
-    sat: data.sat ?? null,
-    speed: data.speed ?? null,
-    course: data.course ?? null,
-    lidar_mm: data.lidar_mm ?? null,
-    // Main environment fields used by current HTML
-    temp: data.temp ?? null,
-    pressure: data.pressure ?? null,
-    humidity: data.humidity ?? null,
+    // ==================================================
 
-    // Extra sensors
-    //temp_bme: data.temp_bme ?? null,
-    gas: data.gas ?? null,
+    lat:
+      numberOrNull(data.lat),
 
-    // IMU
-    roll: data.roll_deg10 != null ? data.roll_deg10 / 10 : null,
-    pitch: data.pitch_deg10 != null ? data.pitch_deg10 / 10 : null,
-    yaw: data.yaw_deg10 != null ? data.yaw_deg10 / 10 : null,
-    // Time
-    date: data.date || now.toISOString().split("T")[0],
-    time: data.time || now.toTimeString().split(" ")[0]
+    lon:
+      numberOrNull(data.lon),
+
+    alt:
+      numberOrNull(data.alt),
+
+    speed:
+      numberOrNull(data.speed),
+
+    sat:
+      numberOrNull(data.sat),
+
+
+    // ==================================================
+    // BME680
+    // ==================================================
+
+    temp:
+      numberOrNull(data.temp),
+
+    humidity:
+      numberOrNull(data.humidity),
+
+    pressure:
+      numberOrNull(data.pressure),
+
+    gas_kohm:
+      numberOrNull(data.gas_kohm),
+
+
+    // ==================================================
+    // MPU6050
+    // Acceleration is received from the ground ESP32
+    // already converted to m/s^2.
+    // ==================================================
+
+    accel_x:
+      numberOrNull(data.accel_x),
+
+    accel_y:
+      numberOrNull(data.accel_y),
+
+    accel_z:
+      numberOrNull(data.accel_z),
+
+    accel_total:
+      numberOrNull(data.accel_total),
+
+
+    // ==================================================
+    // ESP-NOW link
+    // ==================================================
+
+    espnow_rssi:
+      numberOrNull(data.espnow_rssi),
+
+
+    // ==================================================
+    // Server reception time
+    // ==================================================
+
+    date:
+      now.toISOString().split("T")[0],
+
+    time:
+      now.toTimeString().split(" ")[0],
+
+    received_at:
+      now.toISOString()
   };
+
+
+  // ====================================================
+  // Basic packet validation
+  // ====================================================
+
+  if (entry.counter === null) {
+
+    return res.status(400).json({
+      ok: false,
+      error: "Missing or invalid counter"
+    });
+
+  }
+
+
+  // ====================================================
+  // Store telemetry
+  // ====================================================
 
   telemetryHistory.push(entry);
 
-  if (telemetryHistory.length > 100) {
+
+  // Keep history bounded in RAM.
+  if (telemetryHistory.length > MAX_HISTORY) {
     telemetryHistory.shift();
   }
 
-  console.log("Stored:", entry);
 
-  res.status(200).json({ ok: true });
+  // ====================================================
+  // Server console output
+  // ====================================================
+
+  console.log(
+    `Stored telemetry #${entry.counter} | ` +
+    `mode=${entry.mode} | ` +
+    `alt=${entry.alt} m | ` +
+    `speed=${entry.speed} km/h | ` +
+    `RSSI=${entry.espnow_rssi} dBm`
+  );
+
+
+  // ====================================================
+  // Response to ground ESP32
+  // ====================================================
+
+  res.status(200).json({
+    ok: true,
+    counter: entry.counter,
+    stored: telemetryHistory.length
+  });
+
 });
+
+
+// ======================================================
+// ROOT PAGE
+// ======================================================
 
 app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "mapa.html"));
+
+  res.sendFile(
+    path.join(
+      __dirname,
+      "mapa.html"
+    )
+  );
+
 });
 
-const PORT = process.env.PORT || 3000;
+
+// ======================================================
+// SERVER START
+// ======================================================
+
+const PORT =
+  process.env.PORT || 3000;
+
 
 app.listen(PORT, () => {
-  console.log("Running on port", PORT);
+
+  console.log(
+    "======================================"
+  );
+
+  console.log(
+    "Hermes telemetry server running"
+  );
+
+  console.log(
+    "Port:",
+    PORT
+  );
+
+  console.log(
+    "Max history:",
+    MAX_HISTORY,
+    "samples"
+  );
+
+  console.log(
+    "======================================"
+  );
+
 });
