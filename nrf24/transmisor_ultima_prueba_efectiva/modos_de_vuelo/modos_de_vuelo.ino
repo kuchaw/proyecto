@@ -19,6 +19,11 @@ const uint8_t UART_SYNC_2 = 0x55;
 
 // ======================================================
 // HERMES TELEMETRY PACKET
+//
+// IMPORTANT:
+// alt   = fused relative altitude above launch point [m]
+// speed = fused vertical velocity [m/s]
+//         positive = climbing, negative = descending
 // ======================================================
 
 struct __attribute__((packed)) TelemetryPacket {
@@ -27,8 +32,8 @@ struct __attribute__((packed)) TelemetryPacket {
 
   float lat;
   float lon;
-  float alt;
-  float speed;          // km/h
+  float alt;            // fused relative altitude [m]
+  float speed;          // fused vertical speed [m/s]
   uint8_t sat;
 
   float temp;           // deg C
@@ -59,6 +64,25 @@ TelemetryPacket packet;
 #define TXD2 17
 
 TinyGPSPlus gps;
+
+// Last known coordinates are kept only for map continuity.
+float lastKnownLat = 0.0f;
+float lastKnownLon = 0.0f;
+uint8_t lastKnownSat = 0;
+bool hasLastKnownGps = false;
+
+// GPS altitude is used only as a secondary Kalman correction.
+// We create a relative altitude reference from the first valid,
+// stationary samples near the launch point.
+const uint8_t GPS_REFERENCE_SAMPLES = 5;
+const float GPS_REFERENCE_MAX_BARO_ALT_M = 3.0f;
+
+float gpsReferenceAccumulator = 0.0f;
+uint8_t gpsReferenceSampleCount = 0;
+float gpsReferenceAltitudeM = NAN;
+bool gpsReferenceReady = false;
+
+float lastGpsRelativeAltitudeM = NAN;
 
 // ======================================================
 // ESP32-CAM UART
@@ -97,6 +121,7 @@ float pitchDeg = NAN;
 float yawDeg = 0.0f;
 
 float accelTotal = NAN;
+float verticalAcceleration = NAN;
 
 bool mpuValid = false;
 bool mpuAngleInitialized = false;
@@ -110,6 +135,7 @@ const uint32_t MPU_INTERVAL_US = 20000; // 50 Hz
 uint32_t lastMpuSampleUs = 0;
 
 const float MPU_FILTER_TAU_S = 0.50f;
+const float GRAVITY_MS2 = 9.80665f;
 
 // ======================================================
 // BME680
@@ -122,16 +148,177 @@ float lastPressure = NAN;
 float lastHumidity = NAN;
 float lastGas = NAN;
 
+// Barometric reference is calibrated once during setup and then
+// remains fixed for the complete mission.
+const uint16_t BARO_REFERENCE_SAMPLES = 20;
+float pressureReferenceHpa = NAN;
+bool baroReferenceReady = false;
+float lastBaroAltitudeM = NAN;
+
 // ======================================================
-// Last known GPS position
+// Vertical 1D Kalman filter
+//
+// State:
+// x[0] = relative altitude [m]
+// x[1] = vertical velocity [m/s]
+// x[2] = vertical accelerometer bias [m/s^2]
+//
+// Prediction: MPU6050 vertical acceleration
+// Correction: BME680 relative altitude + GPS relative altitude
 // ======================================================
 
-float lastKnownLat = 0.0f;
-float lastKnownLon = 0.0f;
-float lastKnownAlt = 0.0f;
-uint8_t lastKnownSat = 0;
+class VerticalKalman {
+public:
+  float x[3];
+  float P[3][3];
 
-bool hasLastKnownGps = false;
+  // Initial tuning values. These should later be tuned using
+  // real static and flight logs.
+  float accelNoiseSigma = 0.80f;
+  float biasWalkSigma = 0.02f;
+
+  void reset(float initialAltitude = 0.0f, float initialVelocity = 0.0f) {
+    x[0] = initialAltitude;
+    x[1] = initialVelocity;
+    x[2] = 0.0f;
+
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+        P[i][j] = 0.0f;
+      }
+    }
+
+    P[0][0] = 4.0f;     // altitude uncertainty
+    P[1][1] = 4.0f;     // velocity uncertainty
+    P[2][2] = 0.25f;    // acceleration bias uncertainty
+  }
+
+  void predict(float measuredVerticalAcceleration, float dt) {
+    if (!isfinite(measuredVerticalAcceleration) || dt <= 0.0f || dt > 0.20f) {
+      return;
+    }
+
+    const float dt2 = dt * dt;
+    const float correctedAcceleration = measuredVerticalAcceleration - x[2];
+
+    // State prediction.
+    x[0] = x[0] + x[1] * dt + 0.5f * correctedAcceleration * dt2;
+    x[1] = x[1] + correctedAcceleration * dt;
+    // x[2] follows a random walk and is unchanged in the state prediction.
+
+    const float F[3][3] = {
+      {1.0f, dt, -0.5f * dt2},
+      {0.0f, 1.0f, -dt},
+      {0.0f, 0.0f, 1.0f}
+    };
+
+    float FP[3][3] = {};
+
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+        for (int k = 0; k < 3; k++) {
+          FP[i][j] += F[i][k] * P[k][j];
+        }
+      }
+    }
+
+    float newP[3][3] = {};
+
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+        for (int k = 0; k < 3; k++) {
+          // F^T[k][j] = F[j][k]
+          newP[i][j] += FP[i][k] * F[j][k];
+        }
+      }
+    }
+
+    const float accelVariance = accelNoiseSigma * accelNoiseSigma;
+    const float g0 = 0.5f * dt2;
+    const float g1 = dt;
+
+    newP[0][0] += g0 * g0 * accelVariance;
+    newP[0][1] += g0 * g1 * accelVariance;
+    newP[1][0] += g1 * g0 * accelVariance;
+    newP[1][1] += g1 * g1 * accelVariance;
+
+    newP[2][2] += biasWalkSigma * biasWalkSigma * dt;
+
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+        P[i][j] = newP[i][j];
+      }
+    }
+  }
+
+  void updateAltitude(float measuredAltitude, float measurementVariance) {
+    if (!isfinite(measuredAltitude) || measurementVariance <= 0.0f) {
+      return;
+    }
+
+    // H = [1 0 0]
+    const float innovation = measuredAltitude - x[0];
+    const float S = P[0][0] + measurementVariance;
+
+    if (!isfinite(S) || S <= 0.0f) {
+      return;
+    }
+
+    float K[3];
+    K[0] = P[0][0] / S;
+    K[1] = P[1][0] / S;
+    K[2] = P[2][0] / S;
+
+    x[0] += K[0] * innovation;
+    x[1] += K[1] * innovation;
+    x[2] += K[2] * innovation;
+
+    // Keep the old first row because all P updates must use the
+    // covariance matrix from before this measurement correction.
+    float oldFirstRow[3] = {
+      P[0][0],
+      P[0][1],
+      P[0][2]
+    };
+
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+        P[i][j] -= K[i] * oldFirstRow[j];
+      }
+    }
+
+    // Reduce small floating-point asymmetries.
+    for (int i = 0; i < 3; i++) {
+      for (int j = i + 1; j < 3; j++) {
+        const float average = 0.5f * (P[i][j] + P[j][i]);
+        P[i][j] = average;
+        P[j][i] = average;
+      }
+    }
+  }
+
+  float altitude() const {
+    return x[0];
+  }
+
+  float verticalVelocity() const {
+    return x[1];
+  }
+
+  float accelerometerBias() const {
+    return x[2];
+  }
+};
+
+VerticalKalman verticalKalman;
+bool kalmanReady = false;
+
+// Measurement tuning values.
+const float BARO_ALT_SIGMA_M = 1.5f;
+const float GPS_ALT_SIGMA_M = 6.0f;
+
+const float BARO_ALT_VARIANCE = BARO_ALT_SIGMA_M * BARO_ALT_SIGMA_M;
+const float GPS_ALT_VARIANCE = GPS_ALT_SIGMA_M * GPS_ALT_SIGMA_M;
 
 // ======================================================
 // Timing
@@ -160,7 +347,12 @@ unsigned long modeStartMs = 0;
 // ======================================================
 
 void updateGPS();
+void updateGpsAltitudeReferenceAndKalman();
+
 void updateEnvironmentalSensors();
+bool calibrateBarometricReference(uint16_t samples = BARO_REFERENCE_SAMPLES);
+float pressureToRelativeAltitude(float pressureHpa, float referencePressureHpa);
+
 void updateLidar();
 
 void updateMPU6050();
@@ -170,6 +362,10 @@ void printMPUAngleReport();
 
 float wrapAngle180(float angleDeg);
 float complementaryAngle(float gyroPredictionDeg, float accelAngleDeg, float alpha);
+float calculateVerticalAcceleration(float accelX, float accelY, float accelZ,
+                                    float rollDegrees, float pitchDegrees);
+
+void printNavigationFilterReport();
 
 int16_t accelToCms2(float accel_ms2);
 
@@ -213,6 +409,10 @@ void setup() {
 
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
 
+  // ----------------------------------------------------
+  // LiDAR
+  // ----------------------------------------------------
+
   if (!lidar.begin()) {
     Serial.println("VL53L0X LiDAR not detected");
     lidarOk = false;
@@ -220,6 +420,10 @@ void setup() {
     Serial.println("VL53L0X LiDAR detected");
     lidarOk = true;
   }
+
+  // ----------------------------------------------------
+  // BME680
+  // ----------------------------------------------------
 
   if (!bme.begin(0x77)) {
     Serial.println("BME680 not found at 0x77, trying 0x76...");
@@ -239,6 +443,20 @@ void setup() {
   bme.setGasHeater(320, 150);
 
   Serial.println("BME680 detected");
+
+  // Establish h = 0 m at the launch point.
+  if (calibrateBarometricReference()) {
+    verticalKalman.reset(0.0f, 0.0f);
+    kalmanReady = true;
+    Serial.println("Vertical Kalman initialized at h=0 m, v=0 m/s");
+  } else {
+    Serial.println("WARNING: barometric reference calibration failed");
+    kalmanReady = false;
+  }
+
+  // ----------------------------------------------------
+  // MPU6050
+  // ----------------------------------------------------
 
   if (!mpu.begin()) {
     Serial.println("MPU6050 not detected");
@@ -265,6 +483,10 @@ void setup() {
   Serial.print("TelemetryPacket size: ");
   Serial.print(sizeof(TelemetryPacket));
   Serial.println(" bytes");
+  Serial.print("Barometric reference hPa: ");
+  Serial.println(pressureReferenceHpa, 3);
+  Serial.println("alt   = fused relative altitude [m]");
+  Serial.println("speed = fused vertical velocity [m/s]");
   Serial.println("======================================");
 }
 
@@ -275,6 +497,7 @@ void setup() {
 void loop() {
   updateGPS();
 
+  // Optional ESP32-CAM return/debug channel.
   while (CamSerial.available()) {
     Serial.write(CamSerial.read());
   }
@@ -311,6 +534,7 @@ void handlePrelaunch() {
   updateEnvironmentalSensors();
   printMPUReport();
   printMPUAngleReport();
+  printNavigationFilterReport();
   updateLidar();
 
   bool gpsOk = gps.location.isValid() && gps.location.age() < 3000;
@@ -323,7 +547,7 @@ void handlePrelaunch() {
   Serial.println(bmeOk ? "YES" : "NO");
 
   Serial.print("Prelaunch status: ");
-  Serial.println((gpsOk && bmeOk) ? "READY" : "NOT READY");
+  Serial.println((gpsOk && bmeOk && kalmanReady) ? "READY" : "NOT READY");
 
   sendTelemetryCycle();
 }
@@ -335,6 +559,7 @@ void handleDescent() {
   updateEnvironmentalSensors();
   printMPUReport();
   printMPUAngleReport();
+  printNavigationFilterReport();
   updateLidar();
 
   sendTelemetryCycle();
@@ -346,6 +571,7 @@ void handlePostImpact() {
 
   updateEnvironmentalSensors();
   printMPUReport();
+  printNavigationFilterReport();
 
   sendTelemetryCycle();
 }
@@ -358,11 +584,130 @@ void updateGPS() {
   while (Serial2.available() > 0) {
     gps.encode(Serial2.read());
   }
+
+  updateGpsAltitudeReferenceAndKalman();
+}
+
+void updateGpsAltitudeReferenceAndKalman() {
+  // Only act when TinyGPS++ reports a new altitude value.
+  if (!gps.altitude.isUpdated() || !gps.altitude.isValid()) {
+    return;
+  }
+
+  const float gpsAltitudeM = (float)gps.altitude.meters();
+
+  if (!isfinite(gpsAltitudeM)) {
+    return;
+  }
+
+  // Build the GPS reference only from early samples while the barometric
+  // estimate still indicates that the CanSat is close to the launch point.
+  if (!gpsReferenceReady) {
+    const bool nearLaunchPoint =
+      !kalmanReady || fabsf(verticalKalman.altitude()) <= GPS_REFERENCE_MAX_BARO_ALT_M;
+
+    if (currentMode == MODE_PRELAUNCH && nearLaunchPoint) {
+      gpsReferenceAccumulator += gpsAltitudeM;
+      gpsReferenceSampleCount++;
+
+      Serial.print("GPS reference sample ");
+      Serial.print(gpsReferenceSampleCount);
+      Serial.print("/");
+      Serial.print(GPS_REFERENCE_SAMPLES);
+      Serial.print(" altitude=");
+      Serial.println(gpsAltitudeM, 2);
+
+      if (gpsReferenceSampleCount >= GPS_REFERENCE_SAMPLES) {
+        gpsReferenceAltitudeM =
+          gpsReferenceAccumulator / (float)gpsReferenceSampleCount;
+
+        gpsReferenceReady = true;
+
+        Serial.print("GPS altitude reference locked: ");
+        Serial.print(gpsReferenceAltitudeM, 2);
+        Serial.println(" m");
+      }
+    }
+
+    return;
+  }
+
+  lastGpsRelativeAltitudeM = gpsAltitudeM - gpsReferenceAltitudeM;
+
+  if (kalmanReady) {
+    verticalKalman.updateAltitude(
+      lastGpsRelativeAltitudeM,
+      GPS_ALT_VARIANCE
+    );
+  }
 }
 
 // ======================================================
-// BME680
+// BME680 / barometric altitude
 // ======================================================
+
+bool calibrateBarometricReference(uint16_t samples) {
+  if (samples == 0) {
+    return false;
+  }
+
+  Serial.println();
+  Serial.println("===== BAROMETRIC REFERENCE CALIBRATION =====");
+  Serial.println("Keep the CanSat at the launch altitude...");
+
+  double pressureSum = 0.0;
+  uint16_t validSamples = 0;
+
+  for (uint16_t i = 0; i < samples; i++) {
+    if (bme.performReading()) {
+      const float pressureHpa = bme.pressure / 100.0f;
+
+      if (isfinite(pressureHpa) && pressureHpa > 100.0f) {
+        pressureSum += pressureHpa;
+        validSamples++;
+
+        // Keep current environment variables initialized too.
+        lastBmeTemp = bme.temperature;
+        lastPressure = pressureHpa;
+        lastHumidity = bme.humidity;
+        lastGas = bme.gas_resistance / 1000.0f;
+      }
+    }
+
+    delay(20);
+  }
+
+  if (validSamples < samples / 2) {
+    baroReferenceReady = false;
+    return false;
+  }
+
+  pressureReferenceHpa = (float)(pressureSum / validSamples);
+  baroReferenceReady = true;
+  lastBaroAltitudeM = 0.0f;
+
+  Serial.print("Pressure reference: ");
+  Serial.print(pressureReferenceHpa, 3);
+  Serial.print(" hPa from ");
+  Serial.print(validSamples);
+  Serial.println(" valid samples");
+
+  return true;
+}
+
+float pressureToRelativeAltitude(float pressureHpa, float referencePressureHpa) {
+  if (
+    !isfinite(pressureHpa) ||
+    !isfinite(referencePressureHpa) ||
+    pressureHpa <= 0.0f ||
+    referencePressureHpa <= 0.0f
+  ) {
+    return NAN;
+  }
+
+  return 44330.0f *
+    (1.0f - powf(pressureHpa / referencePressureHpa, 0.19029495f));
+}
 
 void updateEnvironmentalSensors() {
   if (bme.performReading()) {
@@ -370,6 +715,20 @@ void updateEnvironmentalSensors() {
     lastPressure = bme.pressure / 100.0f;
     lastHumidity = bme.humidity;
     lastGas = bme.gas_resistance / 1000.0f;
+
+    if (baroReferenceReady) {
+      lastBaroAltitudeM = pressureToRelativeAltitude(
+        lastPressure,
+        pressureReferenceHpa
+      );
+
+      if (kalmanReady && isfinite(lastBaroAltitudeM)) {
+        verticalKalman.updateAltitude(
+          lastBaroAltitudeM,
+          BARO_ALT_VARIANCE
+        );
+      }
+    }
   } else {
     Serial.println("BME680 reading failed");
   }
@@ -391,6 +750,9 @@ void updateEnvironmentalSensors() {
 
   Serial.print("Gas kOhm: ");
   Serial.println(lastGas);
+
+  Serial.print("Barometric relative altitude m: ");
+  Serial.println(lastBaroAltitudeM);
 }
 
 // ======================================================
@@ -500,8 +862,49 @@ float complementaryAngle(float gyroPredictionDeg, float accelAngleDeg, float alp
   return wrapAngle180(gyroPredictionDeg + (1.0f - alpha) * errorDeg);
 }
 
+float calculateVerticalAcceleration(
+  float accelX,
+  float accelY,
+  float accelZ,
+  float rollDegrees,
+  float pitchDegrees
+) {
+  if (
+    !isfinite(accelX) ||
+    !isfinite(accelY) ||
+    !isfinite(accelZ) ||
+    !isfinite(rollDegrees) ||
+    !isfinite(pitchDegrees)
+  ) {
+    return NAN;
+  }
+
+  const float DEG_TO_RAD_F = 0.017453292519943295f;
+
+  const float roll = rollDegrees * DEG_TO_RAD_F;
+  const float pitch = pitchDegrees * DEG_TO_RAD_F;
+
+  const float sinRoll = sinf(roll);
+  const float cosRoll = cosf(roll);
+  const float sinPitch = sinf(pitch);
+  const float cosPitch = cosf(pitch);
+
+  // Projection of the accelerometer's specific force onto the
+  // world vertical axis. With the CanSat still and level this is +g.
+  const float verticalSpecificForce =
+      -sinPitch * accelX
+      + sinRoll * cosPitch * accelY
+      + cosRoll * cosPitch * accelZ;
+
+  // Physical vertical acceleration:
+  // stationary -> 0 m/s^2
+  // upward acceleration -> positive
+  // free fall -> approximately -9.81 m/s^2
+  return verticalSpecificForce - GRAVITY_MS2;
+}
+
 // ======================================================
-// MPU6050 update
+// MPU6050 update + Kalman prediction
 // ======================================================
 
 void updateMPU6050() {
@@ -572,11 +975,31 @@ void updateMPU6050() {
     isfinite(gx) &&
     isfinite(gy) &&
     isfinite(gz) &&
-    isfinite(accelTotal);
+    isfinite(accelTotal) &&
+    isfinite(rollDeg) &&
+    isfinite(pitchDeg);
+
+  verticalAcceleration = calculateVerticalAcceleration(
+    ax,
+    ay,
+    az,
+    rollDeg,
+    pitchDeg
+  );
+
+  if (
+    kalmanReady &&
+    mpuValid &&
+    isfinite(verticalAcceleration) &&
+    dt > 0.0f &&
+    dt <= 0.20f
+  ) {
+    verticalKalman.predict(verticalAcceleration, dt);
+  }
 }
 
 // ======================================================
-// MPU debug
+// MPU / navigation debug
 // ======================================================
 
 void printMPUReport() {
@@ -604,6 +1027,9 @@ void printMPUReport() {
 
   Serial.print("Accel total m/s^2: ");
   Serial.println(accelTotal);
+
+  Serial.print("Vertical acceleration m/s^2: ");
+  Serial.println(verticalAcceleration);
 }
 
 void printMPUAngleReport() {
@@ -621,6 +1047,49 @@ void printMPUAngleReport() {
 
   Serial.print("MPU valid: ");
   Serial.println(mpuValid ? "YES" : "NO");
+}
+
+void printNavigationFilterReport() {
+  Serial.println();
+  Serial.println("===== VERTICAL KALMAN REPORT =====");
+
+  Serial.print("Baro altitude m: ");
+  if (isfinite(lastBaroAltitudeM)) {
+    Serial.println(lastBaroAltitudeM, 2);
+  } else {
+    Serial.println("N/A");
+  }
+
+  Serial.print("GPS reference: ");
+  Serial.println(gpsReferenceReady ? "READY" : "NOT READY");
+
+  Serial.print("GPS relative altitude m: ");
+  if (isfinite(lastGpsRelativeAltitudeM)) {
+    Serial.println(lastGpsRelativeAltitudeM, 2);
+  } else {
+    Serial.println("N/A");
+  }
+
+  Serial.print("Vertical acceleration m/s^2: ");
+  if (isfinite(verticalAcceleration)) {
+    Serial.println(verticalAcceleration, 3);
+  } else {
+    Serial.println("N/A");
+  }
+
+  if (!kalmanReady) {
+    Serial.println("Kalman: NOT READY");
+    return;
+  }
+
+  Serial.print("Kalman altitude m: ");
+  Serial.println(verticalKalman.altitude(), 2);
+
+  Serial.print("Kalman vertical speed m/s: ");
+  Serial.println(verticalKalman.verticalVelocity(), 2);
+
+  Serial.print("Kalman accel bias m/s^2: ");
+  Serial.println(verticalKalman.accelerometerBias(), 4);
 }
 
 // ======================================================
@@ -674,22 +1143,15 @@ size_t sendFramedUartPacket(const uint8_t *data, uint8_t length) {
 // ======================================================
 
 void sendTelemetryPacket() {
-  bool gpsOk = gps.location.isValid() && gps.location.age() < 3000;
+  const bool gpsPositionOk = gps.location.isValid() && gps.location.age() < 3000;
 
   packet.counter++;
   packet.time_ms = millis() - missionStartMs;
 
-  if (gpsOk) {
+  // GPS remains responsible for geographic coordinates and satellite count.
+  if (gpsPositionOk) {
     packet.lat = (float)gps.location.lat();
     packet.lon = (float)gps.location.lng();
-
-    packet.alt = gps.altitude.isValid()
-      ? (float)gps.altitude.meters()
-      : 0.0f;
-
-    packet.speed = gps.speed.isValid()
-      ? (float)gps.speed.kmph()
-      : 0.0f;
 
     packet.sat = gps.satellites.isValid()
       ? (uint8_t)gps.satellites.value()
@@ -697,23 +1159,27 @@ void sendTelemetryPacket() {
 
     lastKnownLat = packet.lat;
     lastKnownLon = packet.lon;
-    lastKnownAlt = packet.alt;
     lastKnownSat = packet.sat;
     hasLastKnownGps = true;
   }
   else if (hasLastKnownGps) {
     packet.lat = lastKnownLat;
     packet.lon = lastKnownLon;
-    packet.alt = lastKnownAlt;
     packet.sat = lastKnownSat;
-    packet.speed = 0.0f;
   }
   else {
     packet.lat = 0.0f;
     packet.lon = 0.0f;
+    packet.sat = 0;
+  }
+
+  // Navigation fields now come from the sensor-fusion estimator.
+  if (kalmanReady) {
+    packet.alt = verticalKalman.altitude();
+    packet.speed = verticalKalman.verticalVelocity();
+  } else {
     packet.alt = 0.0f;
     packet.speed = 0.0f;
-    packet.sat = 0;
   }
 
   packet.temp = isfinite(lastBmeTemp) ? lastBmeTemp : -999.0f;
@@ -748,11 +1214,11 @@ void sendTelemetryPacket() {
   Serial.print("Lon: ");
   Serial.println(packet.lon, 6);
 
-  Serial.print("Alt m: ");
-  Serial.println(packet.alt);
+  Serial.print("Fused relative altitude m: ");
+  Serial.println(packet.alt, 2);
 
-  Serial.print("Speed km/h: ");
-  Serial.println(packet.speed);
+  Serial.print("Fused vertical speed m/s: ");
+  Serial.println(packet.speed, 2);
 
   Serial.print("Satellites: ");
   Serial.println(packet.sat);
