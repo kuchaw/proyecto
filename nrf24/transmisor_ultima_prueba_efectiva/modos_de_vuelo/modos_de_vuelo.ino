@@ -339,6 +339,27 @@ enum MissionMode : uint8_t {
 
 MissionMode currentMode = MODE_PRELAUNCH;
 
+
+// ======================================================
+// Mission transition thresholds
+// ======================================================
+
+const float PRELAUNCH_TO_DESCENT_ALT_M = 70.0f;
+const float DESCENT_VERTICAL_SPEED_MS = -1.0f;
+const uint8_t DESCENT_REQUIRED_SAMPLES = 5;
+
+const unsigned long MIN_DESCENT_TIME_MS = 5000;
+
+const float POST_IMPACT_MAX_ALT_M = 3.0f;
+const float POST_IMPACT_MAX_SPEED_MS = 0.35f;
+const uint16_t POST_IMPACT_LIDAR_MM = 300;
+const uint8_t POST_IMPACT_REQUIRED_SAMPLES = 5;
+
+uint8_t descentCandidateSamples = 0;
+uint8_t postImpactCandidateSamples = 0;
+
+unsigned long descentStartMs = 0;
+unsigned long postImpactStartMs = 0;
 unsigned long missionStartMs = 0;
 unsigned long modeStartMs = 0;
 
@@ -373,21 +394,48 @@ size_t sendFramedUartPacket(const uint8_t *data, uint8_t length);
 void sendTelemetryPacket();
 void sendTelemetryCycle();
 
+
+//declaracion de los modos
 void handlePrelaunch();
 void handleDescent();
 void handlePostImpact();
+
+//declaracion de las condciones para que ccambie de modo
+void checkPrelaunchToDescent();
+void checkDescentToPostImpact();
+
 
 void setMissionMode(MissionMode newMode);
 
 // ======================================================
 // Mission mode control
 // ======================================================
-
 void setMissionMode(MissionMode newMode) {
+  if (newMode == currentMode) {
+    return;
+  }
+
   currentMode = newMode;
   modeStartMs = millis();
-}
 
+  if (newMode == MODE_PRELAUNCH) {
+    descentCandidateSamples = 0;
+    postImpactCandidateSamples = 0;
+  }
+
+  if (newMode == MODE_DESCENT) {
+    descentStartMs = millis();
+    postImpactCandidateSamples = 0;
+
+    Serial.println(">>> MODE CHANGE: DESCENT");
+  }
+
+  if (newMode == MODE_POST_IMPACT) {
+    postImpactStartMs = millis();
+
+    Serial.println(">>> MODE CHANGE: POST_IMPACT");
+  }
+}
 // ======================================================
 // Setup
 // ======================================================
@@ -526,7 +574,6 @@ void loop() {
 // ======================================================
 // Mission handlers
 // ======================================================
-
 void handlePrelaunch() {
   Serial.println();
   Serial.println("===== PRELAUNCH MODE =====");
@@ -549,8 +596,11 @@ void handlePrelaunch() {
   Serial.print("Prelaunch status: ");
   Serial.println((gpsOk && bmeOk && kalmanReady) ? "READY" : "NOT READY");
 
+  checkPrelaunchToDescent();
+
   sendTelemetryCycle();
 }
+
 
 void handleDescent() {
   Serial.println();
@@ -562,9 +612,10 @@ void handleDescent() {
   printNavigationFilterReport();
   updateLidar();
 
+  checkDescentToPostImpact();
+
   sendTelemetryCycle();
 }
-
 void handlePostImpact() {
   Serial.println();
   Serial.println("===== POST IMPACT MODE =====");
@@ -576,6 +627,68 @@ void handlePostImpact() {
   sendTelemetryCycle();
 }
 
+void checkPrelaunchToDescent() {
+  if (!kalmanReady) {
+    descentCandidateSamples = 0;
+    return;
+  }
+
+  float altitudeM = verticalKalman.altitude();
+  float verticalSpeedMs = verticalKalman.verticalVelocity();
+
+  bool altitudeOk =
+    isfinite(altitudeM) &&
+    altitudeM > PRELAUNCH_TO_DESCENT_ALT_M;
+
+  bool descendingOk =
+    isfinite(verticalSpeedMs) &&
+    verticalSpeedMs < DESCENT_VERTICAL_SPEED_MS;
+
+  if (altitudeOk && descendingOk) {
+    descentCandidateSamples++;
+  } else {
+    descentCandidateSamples = 0;
+  }
+
+  Serial.print("Descent candidate samples: ");
+  Serial.println(descentCandidateSamples);
+
+  if (descentCandidateSamples >= DESCENT_REQUIRED_SAMPLES) {
+    setMissionMode(MODE_DESCENT);
+  }
+}
+
+
+void checkPrelaunchToDescent() {
+  if (!kalmanReady) {
+    descentCandidateSamples = 0;
+    return;
+  }
+
+  float altitudeM = verticalKalman.altitude();
+  float verticalSpeedMs = verticalKalman.verticalVelocity();
+
+  bool altitudeOk =
+    isfinite(altitudeM) &&
+    altitudeM > PRELAUNCH_TO_DESCENT_ALT_M;
+
+  bool descendingOk =
+    isfinite(verticalSpeedMs) &&
+    verticalSpeedMs < DESCENT_VERTICAL_SPEED_MS;
+
+  if (altitudeOk && descendingOk) {
+    descentCandidateSamples++;
+  } else {
+    descentCandidateSamples = 0;
+  }
+
+  Serial.print("Descent candidate samples: ");
+  Serial.println(descentCandidateSamples);
+
+  if (descentCandidateSamples >= DESCENT_REQUIRED_SAMPLES) {
+    setMissionMode(MODE_DESCENT);
+  }
+}
 // ======================================================
 // GPS
 // ======================================================
