@@ -139,6 +139,68 @@ float lastPressure = NAN;
 float lastHumidity = NAN;
 float lastGas = NAN;
 
+float pressureReferenceHpa = 0.0f;
+float gpsReferenceAltitude = 0.0f;
+
+float pressureToRelativeAltitude(
+  float pressureHpa,
+  float referencePressureHpa
+) {
+  if (
+    pressureHpa <= 0.0f ||
+    referencePressureHpa <= 0.0f
+  ) {
+    return NAN;
+  }
+
+  return 44330.0f *
+    (
+      1.0f -
+      powf(
+        pressureHpa / referencePressureHpa,
+        0.19029495f
+      )
+    );
+}
+
+float gpsRelativeAltitude =
+  gps.altitude.meters() -
+  gpsReferenceAltitude;
+
+
+  float calculateVerticalAcceleration(
+  float ax,
+  float ay,
+  float az,
+  float rollDeg,
+  float pitchDeg
+) {
+  const float DEG_TO_RAD_F =
+    0.017453292519943295f;
+
+  float roll =
+    rollDeg * DEG_TO_RAD_F;
+
+  float pitch =
+    pitchDeg * DEG_TO_RAD_F;
+
+  float sinRoll = sinf(roll);
+  float cosRoll = cosf(roll);
+
+  float sinPitch = sinf(pitch);
+  float cosPitch = cosf(pitch);
+
+  // Specific force projected onto the world vertical axis.
+  float verticalSpecificForce =
+      -sinPitch * ax
+      + sinRoll * cosPitch * ay
+      + cosRoll * cosPitch * az;
+
+  // Remove gravity.
+  const float G = 9.80665f;
+
+  return verticalSpecificForce - G;
+}
 //GPS variables globales
 float lastKnownLat = 0.0f;
 float lastKnownLon = 0.0f;
