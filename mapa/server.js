@@ -6,6 +6,14 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
+// Avoid cached API responses while the dashboard is running live.
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) {
+    res.set("Cache-Control", "no-store");
+  }
+  next();
+});
+
 
 // ======================================================
 // TELEMETRY STORAGE
@@ -16,6 +24,13 @@ app.use(express.static(path.join(__dirname)));
 const MAX_HISTORY = 2000;
 
 let telemetryHistory = [];
+
+// Long-poll clients waiting for the next telemetry packet.
+// This lets the dashboard update as soon as a packet arrives instead of
+// waiting for the next fixed polling interval.
+const LATEST_WAIT_MS = 3000;
+const MAX_PENDING_LATEST_CLIENTS = 20;
+let pendingLatestClients = [];
 
 
 // ======================================================
@@ -38,6 +53,59 @@ function numberOrNull(value) {
     : null;
 }
 
+function getLatestTelemetry() {
+  if (telemetryHistory.length === 0) {
+    return null;
+  }
+
+  return telemetryHistory[telemetryHistory.length - 1];
+}
+
+function removePendingLatestClient(res) {
+  pendingLatestClients = pendingLatestClients.filter(
+    client => client.res !== res
+  );
+}
+
+function waitForNextTelemetry(res) {
+  if (pendingLatestClients.length >= MAX_PENDING_LATEST_CLIENTS) {
+    return res.status(503).json({
+      ok: false,
+      error: "Too many pending latest requests"
+    });
+  }
+
+  const timeout = setTimeout(() => {
+    removePendingLatestClient(res);
+
+    if (!res.headersSent) {
+      // No new packet arrived during the wait window.
+      // The frontend keeps showing the last known values.
+      res.status(204).end();
+    }
+  }, LATEST_WAIT_MS);
+
+  pendingLatestClients.push({ res, timeout });
+
+  res.on("close", () => {
+    clearTimeout(timeout);
+    removePendingLatestClient(res);
+  });
+}
+
+function notifyLatestClients(entry) {
+  const clients = pendingLatestClients;
+  pendingLatestClients = [];
+
+  for (const client of clients) {
+    clearTimeout(client.timeout);
+
+    if (!client.res.headersSent) {
+      client.res.json(entry);
+    }
+  }
+}
+
 
 // ======================================================
 // GET TELEMETRY HISTORY
@@ -54,18 +122,25 @@ app.get("/api/telemetry", (req, res) => {
 
 app.get("/api/latest", (req, res) => {
 
-  if (telemetryHistory.length === 0) {
+  const latest = getLatestTelemetry();
+
+  if (!latest) {
     return res.status(404).json({
       ok: false,
       message: "No telemetry received yet"
     });
   }
 
-  res.json(
-    telemetryHistory[
-      telemetryHistory.length - 1
-    ]
-  );
+  // Optional long-poll mode:
+  // /api/latest?after=123 means "only answer with a new packet
+  // if the latest counter is different from 123".
+  const after = numberOrNull(req.query.after);
+
+  if (after !== null && latest.counter === after) {
+    return waitForNextTelemetry(res);
+  }
+
+  res.json(latest);
 });
 
 
@@ -205,11 +280,14 @@ app.post("/api/telemetry", (req, res) => {
   // Server console output
   // ====================================================
 
+  // Wake any dashboard request waiting for the next packet.
+  notifyLatestClients(entry);
+
   console.log(
     `Stored telemetry #${entry.counter} | ` +
     `mode=${entry.mode} | ` +
     `alt=${entry.alt} m | ` +
-    `speed=${entry.speed} km/h | ` +
+    `speed=${entry.speed} m/s | ` +
     `RSSI=${entry.espnow_rssi} dBm`
   );
 

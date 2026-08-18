@@ -10,8 +10,8 @@
 // WiFi + backend
 // ============================================================
 
-const char* ssid = "Sf2026";
-const char* password = "16111505";
+const char* ssid = "LaboPLC";
+const char* password = "link1982";
 
 const char* serverUrl =
   "https://cansat1.onrender.com/api/telemetry";

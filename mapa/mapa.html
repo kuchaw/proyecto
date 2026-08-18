@@ -250,6 +250,9 @@
     let mapCentered = false;
     let telemetryHistory = [];
     let currentView = "instant";
+    let latestShownCounter = null;
+    let latestLoopRunning = false;
+    let latestFailures = 0;
 
     const instantBtn = document.getElementById("instantBtn");
     const historyBtn = document.getElementById("historyBtn");
@@ -340,6 +343,10 @@
     }
 
     function showTelemetry(data) {
+      if (!data) return;
+
+      latestShownCounter = data.counter ?? latestShownCounter;
+
       setText("counter", data.counter);
       document.getElementById("mission_time").innerText = formatMissionTime(data.time_ms);
       document.getElementById("mode").innerText = missionModeName(data.mode);
@@ -559,22 +566,60 @@
     }
 
     async function updateTelemetry() {
+      const query = latestShownCounter === null
+        ? ""
+        : "?after=" + encodeURIComponent(latestShownCounter);
+
       try {
-        const res = await fetch("/api/latest", { cache: "no-store" });
-        if (!res.ok) return;
+        const res = await fetch("/api/latest" + query, { cache: "no-store" });
+
+        // 204 means the backend waited but no new packet arrived.
+        // Keep the last displayed values exactly as they are.
+        if (res.status === 204) {
+          return;
+        }
+
+        if (!res.ok) {
+          return;
+        }
+
         const data = await res.json();
+
+        // Only repaint if this is a new packet. This prevents useless redraws
+        // and keeps the old value stable when nothing new arrived.
+        if (data.counter === latestShownCounter) {
+          return;
+        }
 
         upsertHistorySample(data);
         showTelemetry(data);
+        latestFailures = 0;
 
         if (currentView === "history") {
           drawHistoricalCharts();
         }
       } catch (err) {
+        latestFailures++;
         console.error("Error fetching telemetry:", err);
+
         const connection = document.getElementById("connection");
         connection.innerText = "Backend unavailable";
         connection.style.color = "#ef4444";
+      }
+    }
+
+    async function startLatestLoop() {
+      if (latestLoopRunning) return;
+      latestLoopRunning = true;
+
+      while (latestLoopRunning) {
+        await updateTelemetry();
+
+        // If packets are arriving normally, the next request starts immediately.
+        // After repeated failures, slow down slightly to avoid hammering the backend.
+        if (latestFailures > 0) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
       }
     }
 
@@ -583,8 +628,7 @@
       else map.invalidateSize();
     });
 
-    loadHistory();
-    setInterval(updateTelemetry, 1000);
+    loadHistory().then(startLatestLoop);
   </script>
 </body>
 </html>
