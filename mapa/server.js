@@ -152,6 +152,7 @@ app.post("/api/telemetry", (req, res) => {
 
   const data = req.body;
   const now = new Date();
+  const utcMinus3 = new Date(now.getTime() - 3 * 60 * 60 * 1000);
 
 
   const entry = {
@@ -239,10 +240,10 @@ app.post("/api/telemetry", (req, res) => {
     // ==================================================
 
     date:
-      now.toISOString().split("T")[0],
+      utcMinus3.toISOString().split("T")[0],
 
     time:
-      now.toTimeString().split(" ")[0],
+      utcMinus3.toISOString().split("T")[1].split(".")[0],
 
     received_at:
       now.toISOString()
