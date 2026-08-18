@@ -14,7 +14,11 @@
       width: 380px; min-width: 380px; padding: 12px; overflow-y: auto;
       background: #0b0f14; border-right: 2px solid #222;
     }
-    #map { flex: 1; height: 100vh; width: 100%; }
+    #main { flex: 1; height: 100vh; min-width: 0; background: #070a0f; }
+    .main-view { display: none; height: 100%; }
+    .main-view.active { display: block; }
+    #map { height: 100%; width: 100%; }
+
     h2 { margin: 0 0 12px; font-size: 20px; }
     .section { margin-bottom: 16px; }
     .title { margin: 0 0 8px; font-size: 13px; color: #7dd3fc; letter-spacing: 1px; }
@@ -26,10 +30,102 @@
     .status { display: inline-block; padding: 4px 8px; border: 1px solid #444; border-radius: 4px; font-size: 12px; }
     #connection { color: #facc15; }
 
+    .menu {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .menu button {
+      cursor: pointer;
+      background: #000;
+      color: #aaa;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 12px;
+      letter-spacing: 0.5px;
+    }
+
+    .menu button.active {
+      color: #00ff88;
+      border-color: #00ff88;
+    }
+
+    #historyView {
+      overflow-y: auto;
+      padding: 16px;
+    }
+
+    .history-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid #222;
+      padding-bottom: 12px;
+    }
+
+    .history-header h3 {
+      margin: 0;
+      color: #7dd3fc;
+      font-size: 16px;
+      letter-spacing: 1px;
+    }
+
+    .history-meta {
+      color: #aaa;
+      font-size: 12px;
+      text-align: right;
+    }
+
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .chart-card {
+      background: #000;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 12px;
+      min-height: 300px;
+    }
+
+    .chart-card h4 {
+      margin: 0 0 4px;
+      color: #00ff88;
+      font-size: 14px;
+    }
+
+    .chart-card p {
+      margin: 0 0 10px;
+      color: #aaa;
+      font-size: 11px;
+    }
+
+    .chart-card canvas {
+      width: 100%;
+      height: 230px;
+      display: block;
+    }
+
+    @media (max-width: 1000px) {
+      .chart-grid { grid-template-columns: 1fr; }
+    }
+
     @media (max-width: 800px) {
       #container { flex-direction: column; height: auto; }
       #panel { width: 100%; min-width: 0; border-right: none; border-bottom: 2px solid #222; }
-      #map { height: 50vh; min-height: 350px; }
+      #main { height: auto; min-height: 50vh; }
+      #mapView { height: 50vh; min-height: 350px; }
+      #historyView { min-height: 50vh; }
+      .history-header { align-items: flex-start; flex-direction: column; }
+      .history-meta { text-align: left; }
     }
   </style>
 </head>
@@ -37,6 +133,11 @@
   <div id="container">
     <div id="panel">
       <h2>HERMES TELEMETRY</h2>
+
+      <div class="menu">
+        <button id="instantBtn" class="active" type="button">INSTANT DATA</button>
+        <button id="historyBtn" type="button">HISTORICAL</button>
+      </div>
 
       <div class="section">
         <div class="status" id="connection">Waiting for telemetry...</div>
@@ -58,7 +159,7 @@
           <div class="card full"><p>Latitude</p><span id="lat">--</span></div>
           <div class="card full"><p>Longitude</p><span id="lon">--</span></div>
           <div class="card"><p>Altitude (m)</p><span id="alt">--</span></div>
-          <div class="card"><p>Speed (km/h)</p><span id="speed">--</span></div>
+          <div class="card"><p>Speed (m/s)</p><span id="speed">--</span></div>
           <div class="card"><p>Satellites</p><span id="sat">--</span></div>
         </div>
       </div>
@@ -92,7 +193,47 @@
       </div>
     </div>
 
-    <div id="map"></div>
+    <div id="main">
+      <div id="mapView" class="main-view active">
+        <div id="map"></div>
+      </div>
+
+      <div id="historyView" class="main-view">
+        <div class="history-header">
+          <h3>HISTORICAL DATA</h3>
+          <div class="history-meta">
+            <div>Samples: <span id="history_samples">0</span></div>
+            <div>Last packet: <span id="history_last_counter">--</span></div>
+          </div>
+        </div>
+
+        <div class="chart-grid">
+          <div class="chart-card">
+            <h4>Temperature</h4>
+            <p>BME680 temperature over mission time.</p>
+            <canvas id="tempChart"></canvas>
+          </div>
+
+          <div class="chart-card">
+            <h4>Pressure</h4>
+            <p>BME680 pressure over mission time.</p>
+            <canvas id="pressureChart"></canvas>
+          </div>
+
+          <div class="chart-card">
+            <h4>Humidity</h4>
+            <p>BME680 humidity over mission time.</p>
+            <canvas id="humidityChart"></canvas>
+          </div>
+
+          <div class="chart-card">
+            <h4>Vertical speed</h4>
+            <p>Fused vertical speed over mission time.</p>
+            <canvas id="speedChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
@@ -107,6 +248,13 @@
     let routePoints = [];
     let lastCounter = null;
     let mapCentered = false;
+    let telemetryHistory = [];
+    let currentView = "instant";
+
+    const instantBtn = document.getElementById("instantBtn");
+    const historyBtn = document.getElementById("historyBtn");
+    const mapView = document.getElementById("mapView");
+    const historyView = document.getElementById("historyView");
 
     function setText(id, value, digits = null) {
       const el = document.getElementById(id);
@@ -148,6 +296,47 @@
       const a = Number(lat);
       const b = Number(lon);
       return Number.isFinite(a) && Number.isFinite(b) && !(a === 0 && b === 0);
+    }
+
+    function setView(view) {
+      currentView = view;
+
+      const historical = view === "history";
+      instantBtn.classList.toggle("active", !historical);
+      historyBtn.classList.toggle("active", historical);
+      mapView.classList.toggle("active", !historical);
+      historyView.classList.toggle("active", historical);
+
+      if (historical) {
+        drawHistoricalCharts();
+      } else {
+        setTimeout(() => map.invalidateSize(), 50);
+      }
+    }
+
+    instantBtn.addEventListener("click", () => setView("instant"));
+    historyBtn.addEventListener("click", () => setView("history"));
+
+    function upsertHistorySample(sample) {
+      if (!sample || sample.counter === null || sample.counter === undefined) return;
+
+      const existingIndex = telemetryHistory.findIndex(p => p.counter === sample.counter);
+
+      if (existingIndex >= 0) {
+        telemetryHistory[existingIndex] = sample;
+      } else {
+        telemetryHistory.push(sample);
+      }
+
+      if (telemetryHistory.length > 2000) {
+        telemetryHistory.shift();
+      }
+    }
+
+    function updateHistoryMeta() {
+      document.getElementById("history_samples").innerText = telemetryHistory.length;
+      const last = telemetryHistory.length > 0 ? telemetryHistory[telemetryHistory.length - 1] : null;
+      document.getElementById("history_last_counter").innerText = last ? last.counter : "--";
     }
 
     function showTelemetry(data) {
@@ -195,11 +384,157 @@
       }
     }
 
+    function numericSamples(key) {
+      return telemetryHistory
+        .map((p, index) => {
+          const y = Number(p[key]);
+          const x = Number.isFinite(Number(p.time_ms)) ? Number(p.time_ms) / 1000 : index;
+          return {
+            x,
+            y,
+            label: Number.isFinite(Number(p.time_ms)) ? formatMissionTime(p.time_ms) : String(p.counter ?? index)
+          };
+        })
+        .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+    }
+
+    function drawNoData(ctx, width, height, title) {
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#0b0f14";
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = "#aaa";
+      ctx.font = "12px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("No " + title + " data yet", width / 2, height / 2);
+    }
+
+    function drawLineChart(canvasId, key, unit, title) {
+      const canvas = document.getElementById(canvasId);
+      const ctx = canvas.getContext("2d");
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(300, Math.floor(rect.width * dpr));
+      const height = Math.max(220, Math.floor(rect.height * dpr));
+
+      canvas.width = width;
+      canvas.height = height;
+
+      const points = numericSamples(key);
+
+      if (points.length < 2) {
+        drawNoData(ctx, width, height, title);
+        return;
+      }
+
+      const padLeft = 52 * dpr;
+      const padRight = 14 * dpr;
+      const padTop = 18 * dpr;
+      const padBottom = 36 * dpr;
+      const plotW = width - padLeft - padRight;
+      const plotH = height - padTop - padBottom;
+
+      const minX = points[0].x;
+      const maxX = points[points.length - 1].x;
+      let minY = Math.min(...points.map(p => p.y));
+      let maxY = Math.max(...points.map(p => p.y));
+
+      if (minY === maxY) {
+        minY -= 1;
+        maxY += 1;
+      }
+
+      const yPadding = (maxY - minY) * 0.1;
+      minY -= yPadding;
+      maxY += yPadding;
+
+      function xPos(x) {
+        if (maxX === minX) return padLeft;
+        return padLeft + ((x - minX) / (maxX - minX)) * plotW;
+      }
+
+      function yPos(y) {
+        return padTop + (1 - ((y - minY) / (maxY - minY))) * plotH;
+      }
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#0b0f14";
+      ctx.fillRect(0, 0, width, height);
+
+      ctx.strokeStyle = "#222";
+      ctx.lineWidth = 1 * dpr;
+      ctx.fillStyle = "#aaa";
+      ctx.font = `${11 * dpr}px monospace`;
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+
+      const gridLines = 4;
+      for (let i = 0; i <= gridLines; i++) {
+        const t = i / gridLines;
+        const y = padTop + t * plotH;
+        const value = maxY - t * (maxY - minY);
+
+        ctx.beginPath();
+        ctx.moveTo(padLeft, y);
+        ctx.lineTo(width - padRight, y);
+        ctx.stroke();
+        ctx.fillText(value.toFixed(1), padLeft - 8 * dpr, y);
+      }
+
+      ctx.strokeStyle = "#555";
+      ctx.beginPath();
+      ctx.moveTo(padLeft, padTop);
+      ctx.lineTo(padLeft, height - padBottom);
+      ctx.lineTo(width - padRight, height - padBottom);
+      ctx.stroke();
+
+      ctx.strokeStyle = "#00ff88";
+      ctx.lineWidth = 2 * dpr;
+      ctx.beginPath();
+      points.forEach((p, index) => {
+        const x = xPos(p.x);
+        const y = yPos(p.y);
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      const latest = points[points.length - 1];
+      ctx.fillStyle = "#00ff88";
+      ctx.beginPath();
+      ctx.arc(xPos(latest.x), yPos(latest.y), 3.5 * dpr, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#aaa";
+      ctx.font = `${11 * dpr}px monospace`;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(points[0].label, padLeft, height - padBottom + 10 * dpr);
+
+      ctx.textAlign = "right";
+      ctx.fillText(points[points.length - 1].label, width - padRight, height - padBottom + 10 * dpr);
+
+      ctx.fillStyle = "#00ff88";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "top";
+      ctx.fillText(latest.y.toFixed(2) + " " + unit, width - padRight, padTop);
+    }
+
+    function drawHistoricalCharts() {
+      updateHistoryMeta();
+      drawLineChart("tempChart", "temp", "°C", "temperature");
+      drawLineChart("pressureChart", "pressure", "hPa", "pressure");
+      drawLineChart("humidityChart", "humidity", "%", "humidity");
+      drawLineChart("speedChart", "speed", "m/s", "speed");
+    }
+
     async function loadHistory() {
       try {
         const res = await fetch("/api/telemetry", { cache: "no-store" });
         const history = await res.json();
         if (!Array.isArray(history)) return;
+
+        telemetryHistory = history;
+        updateHistoryMeta();
 
         routePoints = history
           .filter(p => validGps(p.lat, p.lon))
@@ -228,7 +563,13 @@
         const res = await fetch("/api/latest", { cache: "no-store" });
         if (!res.ok) return;
         const data = await res.json();
+
+        upsertHistorySample(data);
         showTelemetry(data);
+
+        if (currentView === "history") {
+          drawHistoricalCharts();
+        }
       } catch (err) {
         console.error("Error fetching telemetry:", err);
         const connection = document.getElementById("connection");
@@ -236,6 +577,11 @@
         connection.style.color = "#ef4444";
       }
     }
+
+    window.addEventListener("resize", () => {
+      if (currentView === "history") drawHistoricalCharts();
+      else map.invalidateSize();
+    });
 
     loadHistory();
     setInterval(updateTelemetry, 1000);
