@@ -30,8 +30,27 @@
     .status { display: inline-block; padding: 4px 8px; border: 1px solid #444; border-radius: 4px; font-size: 12px; }
     #connection { color: #facc15; }
 
-    .horizon-wrap { display: flex; justify-content: center; margin-bottom: 8px; }
-    #horizonCanvas { border-radius: 50%; border: 1px solid #333; background: #000; }
+    #horizon-panel {
+      width: 300px; min-width: 300px; padding: 12px; overflow-y: auto;
+      background: #0b0f14; border-left: 2px solid #222;
+    }
+
+    #horizon-panel h3 {
+      margin: 0 0 12px; font-size: 16px; color: #7dd3fc; letter-spacing: 1px;
+    }
+
+    #horizon-canvas {
+      background: #000;
+      border: 2px solid #333;
+      border-radius: 50%;
+      display: block;
+      margin: 0 auto 16px;
+      box-shadow: 0 0 10px rgba(0, 255, 136, 0.1);
+    }
+
+    #horizon-panel .card { min-height: 60px; padding: 8px; }
+    #horizon-panel .card p { font-size: 11px; }
+    #horizon-panel .card span { font-size: 14px; }
 
     .menu {
       display: grid;
@@ -135,6 +154,7 @@
       #main { height: auto; min-height: 50vh; }
       #mapView { height: 50vh; min-height: 350px; }
       #historyView { min-height: 50vh; }
+      #horizon-panel { width: 100%; min-width: 0; border-left: none; border-top: 2px solid #222; }
       .history-header { align-items: flex-start; flex-direction: column; }
       .history-meta { text-align: left; }
     }
@@ -191,34 +211,6 @@
         </div>
       </div>
 
-      <div class="section">
-        <h4 class="title">ACCELERATION</h4>
-        <div class="grid">
-          <div class="card"><p>Accel X (m/s²)</p><span id="accel_x">--</span></div>
-          <div class="card"><p>Accel Y (m/s²)</p><span id="accel_y">--</span></div>
-          <div class="card"><p>Accel Z (m/s²)</p><span id="accel_z">--</span></div>
-          <div class="card"><p>Accel Total (m/s²)</p><span id="accel_total">--</span></div>
-        </div>
-      </div>
-
-      <div class="section">
-        <h4 class="title">ATTITUDE</h4>
-        <div class="horizon-wrap">
-          <canvas id="horizonCanvas" width="200" height="200"></canvas>
-        </div>
-        <div class="grid">
-          <div class="card"><p>Roll (deg)</p><span id="roll">--</span></div>
-          <div class="card"><p>Pitch (deg)</p><span id="pitch">--</span></div>
-        </div>
-      </div>
-
-      <div class="section">
-        <h4 class="title">GROUND RECEIPT TIME</h4>
-        <div class="grid">
-          <div class="card"><p>Date</p><span id="date">--</span></div>
-          <div class="card"><p>Time</p><span id="time">--</span></div>
-        </div>
-      </div>
     </div>
 
     <div id="main">
@@ -259,6 +251,34 @@
             <p>Fused vertical speed over mission time.</p>
             <canvas id="speedChart"></canvas>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="horizon-panel">
+      <h3>ATTITUDE</h3>
+
+      <div style="text-align: center;">
+        <canvas id="horizon-canvas" width="280" height="280"></canvas>
+      </div>
+
+      <div class="section">
+        <h4 class="title">MPU6050 DATA</h4>
+        <div class="grid">
+          <div class="card"><p>Accel X (m/s²)</p><span id="mpu-accel-x">--</span></div>
+          <div class="card"><p>Accel Y (m/s²)</p><span id="mpu-accel-y">--</span></div>
+          <div class="card"><p>Accel Z (m/s²)</p><span id="mpu-accel-z">--</span></div>
+          <div class="card"><p>Accel Total (m/s²)</p><span id="mpu-accel-total">--</span></div>
+          <div class="card"><p>Roll (deg)</p><span id="roll">--</span></div>
+          <div class="card"><p>Pitch (deg)</p><span id="pitch">--</span></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h4 class="title">GROUND RECEIPT TIME</h4>
+        <div class="grid">
+          <div class="card"><p>Date</p><span id="date">--</span></div>
+          <div class="card"><p>Time</p><span id="time">--</span></div>
         </div>
       </div>
     </div>
@@ -328,9 +348,16 @@
     // Artificial horizon (roll/pitch attitude widget)
     // ==================================================
 
-    const horizonCanvas = document.getElementById("horizonCanvas");
+    const horizonCanvas = document.getElementById("horizon-canvas");
     const horizonCtx = horizonCanvas ? horizonCanvas.getContext("2d") : null;
-    const HORIZON_PX_PER_DEG = 3;
+
+    const HORIZON_PX_PER_DEG = 3.2;      // vertical shift of the pitch ladder per degree
+    const HORIZON_ROLL_TICKS = [10, 20, 30, 45, 60];
+    const HORIZON_PITCH_TICKS = [10, 20, 30];
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
 
     function drawArtificialHorizon(rollDeg, pitchDeg) {
       if (!horizonCtx) return;
@@ -339,36 +366,80 @@
       const h = horizonCanvas.height;
       const cx = w / 2;
       const cy = h / 2;
-      const radius = cx - 2;
 
-      const roll = Number.isFinite(Number(rollDeg)) ? Number(rollDeg) : 0;
-      const pitch = Number.isFinite(Number(pitchDeg)) ? Number(pitchDeg) : 0;
-      const pitchOffsetPx = Math.max(
-        -radius,
-        Math.min(radius, pitch * HORIZON_PX_PER_DEG)
+      const outerRadius = Math.min(cx, cy) - 4;   // bezel
+      const scaleRadius = outerRadius - 16;       // fixed bank-angle scale
+      const ballRadius = scaleRadius - 14;        // rotating sphere (sky/ground)
+
+      const roll = clamp(
+        Math.round((Number.isFinite(Number(rollDeg)) ? Number(rollDeg) : 0) * 10) / 10,
+        -180, 180
       );
+      const pitch = clamp(
+        Math.round((Number.isFinite(Number(pitchDeg)) ? Number(pitchDeg) : 0) * 10) / 10,
+        -90, 90
+      );
+
+      const rollRad = -roll * Math.PI / 180;
+      const pitchOffsetPx = pitch * HORIZON_PX_PER_DEG;
 
       horizonCtx.clearRect(0, 0, w, h);
 
+      // --------------------------------------------------
+      // Bezel background
+      // --------------------------------------------------
+      horizonCtx.fillStyle = "#000";
+      horizonCtx.beginPath();
+      horizonCtx.arc(cx, cy, outerRadius, 0, Math.PI * 2);
+      horizonCtx.fill();
+
+      // --------------------------------------------------
+      // Rotating sphere: sky, ground, horizon line, pitch ladder
+      // --------------------------------------------------
       horizonCtx.save();
       horizonCtx.beginPath();
-      horizonCtx.arc(cx, cy, radius, 0, Math.PI * 2);
+      horizonCtx.arc(cx, cy, ballRadius, 0, Math.PI * 2);
       horizonCtx.clip();
 
       horizonCtx.translate(cx, cy);
-      horizonCtx.rotate(-roll * Math.PI / 180);
+      horizonCtx.rotate(rollRad);
       horizonCtx.translate(0, pitchOffsetPx);
 
       const bigSize = (w + h) * 2;
 
-      horizonCtx.fillStyle = "#4a90d9";
+      horizonCtx.fillStyle = "#1e40af"; // sky
       horizonCtx.fillRect(-bigSize / 2, -bigSize, bigSize, bigSize);
 
-      horizonCtx.fillStyle = "#8b5a2b";
+      horizonCtx.fillStyle = "#654321"; // ground
       horizonCtx.fillRect(-bigSize / 2, 0, bigSize, bigSize);
 
+      // Pitch ladder, relative to the horizon line (fixed spacing pattern).
+      horizonCtx.strokeStyle = "#666";
+      horizonCtx.fillStyle = "#fff";
+      horizonCtx.font = "10px monospace";
+      horizonCtx.textAlign = "center";
+      horizonCtx.lineWidth = 1;
+
+      HORIZON_PITCH_TICKS.forEach(step => {
+        const halfWidth = 18 + (step / 10) * 8;
+        [step, -step].forEach(value => {
+          const y = -value * HORIZON_PX_PER_DEG;
+
+          horizonCtx.beginPath();
+          horizonCtx.moveTo(-halfWidth, y);
+          horizonCtx.lineTo(-halfWidth * 0.35, y);
+          horizonCtx.moveTo(halfWidth * 0.35, y);
+          horizonCtx.lineTo(halfWidth, y);
+          horizonCtx.stroke();
+
+          horizonCtx.fillText(String(value), -halfWidth - 11, y + 3);
+          horizonCtx.fillText(String(value), halfWidth + 11, y + 3);
+        });
+      });
+
+      // Horizon line, thick and white, always at local y = 0.
       horizonCtx.strokeStyle = "#ffffff";
-      horizonCtx.lineWidth = 2;
+      horizonCtx.lineWidth = 3;
       horizonCtx.beginPath();
       horizonCtx.moveTo(-bigSize / 2, 0);
       horizonCtx.lineTo(bigSize / 2, 0);
@@ -376,27 +447,125 @@
 
       horizonCtx.restore();
 
-      horizonCtx.strokeStyle = "#ffcc00";
-      horizonCtx.fillStyle = "#ffcc00";
+      // --------------------------------------------------
+      // Roll graduation marks, painted on the ball's rim.
+      // Rotates with roll, does not shift with pitch.
+      // Unlabeled: the degree numbers live on the fixed bank
+      // scale below, keeping the two rings from cluttering.
+      // --------------------------------------------------
+      horizonCtx.save();
+      horizonCtx.beginPath();
+      horizonCtx.arc(cx, cy, ballRadius, 0, Math.PI * 2);
+      horizonCtx.clip();
+
+      horizonCtx.translate(cx, cy);
+      horizonCtx.rotate(rollRad);
+
+      horizonCtx.strokeStyle = "#ccc";
+
+      HORIZON_ROLL_TICKS.forEach(deg => {
+        const major = deg === 30 || deg === 60;
+        horizonCtx.lineWidth = major ? 2 : 1;
+
+        [deg, -deg].forEach(angleDeg => {
+          const angleRad = angleDeg * Math.PI / 180;
+          const innerR = ballRadius - (major ? 14 : 8);
+
+          const x1 = Math.sin(angleRad) * ballRadius;
+          const y1 = -Math.cos(angleRad) * ballRadius;
+          const x2 = Math.sin(angleRad) * innerR;
+          const y2 = -Math.cos(angleRad) * innerR;
+
+          horizonCtx.beginPath();
+          horizonCtx.moveTo(x1, y1);
+          horizonCtx.lineTo(x2, y2);
+          horizonCtx.stroke();
+        });
+      });
+
+      horizonCtx.restore();
+
+      // --------------------------------------------------
+      // Fixed aircraft silhouette (never rotates).
+      // --------------------------------------------------
+      horizonCtx.strokeStyle = "#f59e0b";
+      horizonCtx.fillStyle = "#f59e0b";
       horizonCtx.lineWidth = 3;
 
       horizonCtx.beginPath();
-      horizonCtx.moveTo(cx - 45, cy);
+      horizonCtx.moveTo(cx - 42, cy);
       horizonCtx.lineTo(cx - 12, cy);
       horizonCtx.moveTo(cx + 12, cy);
-      horizonCtx.lineTo(cx + 45, cy);
-      horizonCtx.moveTo(cx, cy);
-      horizonCtx.lineTo(cx, cy - 10);
+      horizonCtx.lineTo(cx + 42, cy);
       horizonCtx.stroke();
+
+      horizonCtx.beginPath();
+      horizonCtx.moveTo(cx, cy - 12);
+      horizonCtx.lineTo(cx - 6, cy - 2);
+      horizonCtx.lineTo(cx + 6, cy - 2);
+      horizonCtx.closePath();
+      horizonCtx.fill();
 
       horizonCtx.beginPath();
       horizonCtx.arc(cx, cy, 4, 0, Math.PI * 2);
       horizonCtx.fill();
 
-      horizonCtx.strokeStyle = "#222";
+      // --------------------------------------------------
+      // Bank scale (fixed arc + ticks) and roll pointer.
+      // --------------------------------------------------
+      horizonCtx.strokeStyle = "#ff9900";
+      horizonCtx.lineWidth = 2;
+      horizonCtx.beginPath();
+      horizonCtx.arc(cx, cy, scaleRadius, -Math.PI, 0);
+      horizonCtx.stroke();
+
+      horizonCtx.fillStyle = "#fbbf24";
+      horizonCtx.font = "9px monospace";
+      horizonCtx.textAlign = "center";
+
+      HORIZON_ROLL_TICKS.forEach(deg => {
+        [deg, -deg].forEach(angleDeg => {
+          const angleRad = angleDeg * Math.PI / 180;
+          const x1 = Math.sin(angleRad) * scaleRadius;
+          const y1 = -Math.cos(angleRad) * scaleRadius + cy;
+          const x2 = Math.sin(angleRad) * (scaleRadius - 6);
+          const y2 = -Math.cos(angleRad) * (scaleRadius - 6) + cy;
+
+          horizonCtx.beginPath();
+          horizonCtx.moveTo(cx + x1, y1);
+          horizonCtx.lineTo(cx + x2, y2);
+          horizonCtx.stroke();
+
+          const lx = cx + Math.sin(angleRad) * (scaleRadius - 14);
+          const ly = -Math.cos(angleRad) * (scaleRadius - 14) + cy + 3;
+          horizonCtx.fillText(String(deg), lx, ly);
+        });
+      });
+
+      // Roll pointer: white triangle riding the fixed scale, positioned by roll.
+      const pointerRad = clamp(roll, -60, 60) * Math.PI / 180;
+      const px = cx + Math.sin(pointerRad) * scaleRadius;
+      const py = cy - Math.cos(pointerRad) * scaleRadius;
+
+      horizonCtx.save();
+      horizonCtx.translate(px, py);
+      horizonCtx.rotate(pointerRad);
+      horizonCtx.fillStyle = "#ffffff";
+      horizonCtx.beginPath();
+      horizonCtx.moveTo(0, 6);
+      horizonCtx.lineTo(-5, -4);
+      horizonCtx.lineTo(5, -4);
+      horizonCtx.closePath();
+      horizonCtx.fill();
+      horizonCtx.restore();
+
+      // --------------------------------------------------
+      // Outer bezel border.
+      // --------------------------------------------------
+      horizonCtx.strokeStyle = "#333";
       horizonCtx.lineWidth = 3;
       horizonCtx.beginPath();
-      horizonCtx.arc(cx, cy, radius, 0, Math.PI * 2);
+      horizonCtx.arc(cx, cy, outerRadius, 0, Math.PI * 2);
       horizonCtx.stroke();
     }
 
@@ -468,10 +637,10 @@
       setText("pressure", data.pressure, 2);
       setText("gas_kohm", data.gas_kohm, 2);
 
-      setText("accel_x", data.accel_x, 2);
-      setText("accel_y", data.accel_y, 2);
-      setText("accel_z", data.accel_z, 2);
-      setText("accel_total", data.accel_total, 2);
+      setText("mpu-accel-x", data.accel_x, 2);
+      setText("mpu-accel-y", data.accel_y, 2);
+      setText("mpu-accel-z", data.accel_z, 2);
+      setText("mpu-accel-total", data.accel_total, 2);
 
       setText("roll", data.roll, 2);
       setText("pitch", data.pitch, 2);
